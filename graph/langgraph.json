@@ -1,0 +1,11 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "agent": {
+      "path": "src.agent.graph:graph",
+      "title": "BookedAI Agent",
+      "description": "A helpful AI assistant for BookedAI with tools for time, math, and web search"
+    }
+  },
+  "env": ".env"
+} 
