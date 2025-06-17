@@ -141,6 +141,7 @@ cython_debug/
 
 # LangGraph specific
 .langgraph/
+.langgraph_api/
 
 # OS
 .DS_Store
