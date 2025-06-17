@@ -9,6 +9,92 @@ A hands-on mini project designed for new team members to learn LangGraph agent d
 **Original Idea**: Simple agent with basic tool calling (calculator, weather, etc.)
 **Final Concept**: Travel search agent using Duffel API v2 for flights and hotels/stays with a modern chat interface
 
+## Current Status
+
+✅ **Phase 1 Complete**: Basic LangGraph agent with tools and dev server
+- LangGraph agent with time, math, and web search tools
+- Working `langgraph dev` server setup
+- Human-in-the-loop capabilities
+- Ready for UI integration
+
+🚧 **Next Phase**: Duffel API integration and Agent Chat UI setup
+
+## Quick Start (Current Implementation)
+
+### Prerequisites
+- **Python 3.11+** (required for langgraph dev server)
+- **uv** - Install from [https://docs.astral.sh/uv/](https://docs.astral.sh/uv/)
+- **OpenAI API Key** - For the language model
+
+### Setup Instructions
+
+1. **Clone the repository**:
+   ```bash
+   git clone <repository-url>
+   cd mini_bookedai
+   ```
+
+2. **Setup the LangGraph agent**:
+   ```bash
+   cd graph/
+   
+   # Install dependencies (automatically creates venv with Python 3.11)
+   uv sync
+   
+   # Configure environment variables
+   cp env.example .env
+   # Edit .env and add your OPENAI_API_KEY
+   ```
+
+3. **Start the LangGraph development server**:
+   ```bash
+   # From the graph/ directory
+   source .venv/bin/activate
+   langgraph dev --no-browser
+   ```
+   
+   The server will start on `http://127.0.0.1:2024` with:
+   - 🚀 **API**: http://127.0.0.1:2024
+   - 📚 **API Docs**: http://127.0.0.1:2024/docs
+   - 🎨 **Studio UI**: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+
+### Testing the Agent
+
+You can test the agent using the LangGraph Studio UI or API endpoints:
+
+**Available Tools**:
+- `get_current_time()` - Get current date and time
+- `calculate_simple_math(expression)` - Perform arithmetic calculations
+- `search_web(query)` - Mock web search (demo purposes)
+
+**Example Interactions**:
+```
+User: "What time is it?"
+Agent: [Uses get_current_time tool] The current time is 2024-06-16 15:30:22
+
+User: "Calculate 25 * 4 + 10"  
+Agent: [Uses calculate_simple_math tool] The result is 110
+```
+
+### Project Structure (Current)
+
+```
+mini_bookedai/
+├── graph/                        # ✅ LangGraph implementation (COMPLETE)
+│   ├── pyproject.toml           # uv project configuration with langgraph-cli[inmem]
+│   ├── .python-version          # Python 3.11 requirement
+│   ├── langgraph.json           # LangGraph server configuration
+│   ├── env.example              # Environment variables template
+│   ├── src/
+│   │   └── agent/
+│   │       ├── __init__.py
+│   │       └── graph.py         # Complete agent implementation
+│   └── README.md                # Detailed setup instructions
+├── ui/                          # 🚧 Agent Chat UI (PLANNED)
+│   └── (to be implemented)
+└── README.md                    # This file
+```
+
 ## Key Components
 
 ### Technical Stack
@@ -30,7 +116,7 @@ A hands-on mini project designed for new team members to learn LangGraph agent d
 - **Conversational Interface** - Natural language queries via modern chat UI
 - **Local Development** - LangGraph server running locally with hot reload
 
-## Project Structure
+## Full Project Structure (Planned)
 
 ```
 mini_bookedai/
@@ -70,7 +156,7 @@ mini_bookedai/
 └── README.md
 ```
 
-## Development Setup
+## Development Setup (Full Implementation)
 
 ### Prerequisites
 - **Python 3.11+** (managed via uv)
@@ -78,7 +164,7 @@ mini_bookedai/
 - **pnpm** - Install from [https://pnpm.io/installation](https://pnpm.io/installation)
 - **uv** - Install from [https://docs.astral.sh/uv/](https://docs.astral.sh/uv/)
 
-### Quick Start
+### Full Setup (When UI is implemented)
 
 1. **Clone and setup the LangGraph server**:
    ```bash
@@ -101,29 +187,30 @@ mini_bookedai/
 
 ## Implementation Phases
 
-### Phase 1: Foundation
-- Set up Agent Chat UI with basic configuration
-- Initialize LangGraph project with uv
-- Implement simple flight search tool
-- Establish UI ↔ Graph server communication
+### Phase 1: Foundation ✅ COMPLETE
+- ✅ Set up basic LangGraph project with uv
+- ✅ Implement basic tools (time, math, web search)
+- ✅ Configure langgraph dev server
+- ✅ Human-in-the-loop capabilities
+- ✅ Memory and conversation state
 
-### Phase 2: Core Features
+### Phase 2: Core Features (NEXT)
+- Set up Agent Chat UI with basic configuration
+- Implement simple flight search tool using Duffel API
+- Establish UI ↔ Graph server communication
 - Add stays search functionality
+
+### Phase 3: Enhanced UX
 - Implement location lookup/suggestions
 - Enhanced error handling and validation
 - UI improvements for travel search results
-
-### Phase 3: Enhanced UX
 - Natural language date parsing
+
+### Phase 4: Advanced Features
 - Multi-step conversations
 - Human-in-the-loop for booking confirmation
 - Result formatting and comparison in chat
-
-### Phase 4: Advanced Features
 - Concurrent flight + hotel searches
-- Price comparison and sorting
-- Search history and preferences
-- Advanced chat UI customizations
 
 ## Learning Objectives
 
@@ -212,13 +299,14 @@ class FlightOffer(BaseModel):
 
 ## Success Criteria
 
-- LangGraph server runs locally with hot reload via uv
-- Agent Chat UI connects to local LangGraph server
-- Agent can search flights using natural language
-- Agent can search hotels/stays using natural language
-- Proper error handling and user feedback
-- Clean, maintainable code structure with modern tooling
-- Complete documentation for future team members
+- ✅ LangGraph server runs locally with hot reload via uv
+- ✅ Agent can handle tool calls and human-in-the-loop interactions
+- ✅ Proper error handling and user feedback
+- ✅ Clean, maintainable code structure with modern tooling
+- 🚧 Agent Chat UI connects to local LangGraph server
+- 🚧 Agent can search flights using natural language
+- 🚧 Agent can search hotels/stays using natural language
+- 🚧 Complete documentation for future team members
 
 ## Key Resources
 
@@ -240,7 +328,7 @@ This project hits the sweet spot of being:
 
 1. Create detailed Linear issues for each implementation phase
 2. Set up Agent Chat UI in `ui/` directory
-3. Initialize LangGraph project with uv in `graph/` directory
-4. Establish local development workflow
-5. Begin Phase 1 implementation
+3. Initialize Duffel API integration in LangGraph agent
+4. Establish UI ↔ Graph server communication workflow
+5. Begin Phase 2 implementation
 6. Plan onboarding materials for new team members 
