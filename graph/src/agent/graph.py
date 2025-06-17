@@ -4,6 +4,7 @@ LangGraph Agent for BookedAI
 from typing import Annotated, List, Dict, Any, Optional
 from typing_extensions import TypedDict
 import os
+from datetime import date, datetime
 from dotenv import load_dotenv
 
 from langchain_openai import ChatOpenAI
@@ -15,6 +16,11 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.errors import GraphInterrupt
+
+# Import our Duffel client
+from ..duffel_client.endpoints.stays import search_hotels
+from ..duffel_client.client import DuffelAPIError
+from ..config import config
 
 # Load environment variables
 load_dotenv()
@@ -54,6 +60,74 @@ def search_web(query: str) -> str:
     return f"Mock search results for: {query}. This would normally return real web search results."
 
 
+@tool
+async def search_hotels_tool(
+    location: str,
+    check_in_date: str,
+    check_out_date: str,
+    adults: int = 1,
+    children: int = 0,
+    max_results: int = 5
+) -> str:
+    """Search for hotels in a specific location and date range.
+    
+    Args:
+        location: City or location name to search for hotels (e.g., "Tokyo", "New York", "Paris")
+        check_in_date: Check-in date in YYYY-MM-DD format (e.g., "2024-12-15")  
+        check_out_date: Check-out date in YYYY-MM-DD format (e.g., "2024-12-22")
+        adults: Number of adult guests (default: 1)
+        children: Number of child guests (default: 0)
+        max_results: Maximum number of hotel results to return (default: 5)
+        
+    Returns:
+        Formatted string with hotel search results including names, ratings, and prices
+    """
+    try:
+        # Validate date format and parse dates
+        try:
+            check_in = datetime.strptime(check_in_date, "%Y-%m-%d").date()
+            check_out = datetime.strptime(check_out_date, "%Y-%m-%d").date()
+        except ValueError:
+            return "Error: Dates must be in YYYY-MM-DD format (e.g., '2024-12-15')"
+        
+        # Validate date logic
+        if check_out <= check_in:
+            return "Error: Check-out date must be after check-in date"
+        
+        if check_in < date.today():
+            return "Error: Check-in date cannot be in the past"
+        
+        # Validate guest counts
+        if adults < 1 or children < 0:
+            return "Error: Must have at least 1 adult guest, children cannot be negative"
+        
+        # Validate max_results
+        if max_results < 1 or max_results > 20:
+            return "Error: max_results must be between 1 and 20"
+        
+        # Check if Duffel API token is configured
+        if not config.DUFFEL_API_TOKEN:
+            return "Hotel search is currently unavailable. Please configure the Duffel API token."
+        
+        # Perform hotel search
+        response = await search_hotels(
+            location=location,
+            check_in=check_in,
+            check_out=check_out,
+            adults=adults,
+            children=children,
+            limit=max_results
+        )
+        
+        # Format results for display
+        return response.format_for_display(max_results=max_results)
+        
+    except DuffelAPIError as e:
+        return f"Hotel search error: {e.error.title} - {e.error.detail or 'Please try again later'}"
+    except Exception as e:
+        return f"Unexpected error during hotel search: {str(e)}"
+
+
 # Create the LLM
 def create_llm():
     """Create and configure the language model."""
@@ -68,19 +142,41 @@ def create_llm():
 def agent_node(state: AgentState) -> Dict[str, Any]:
     """Main agent reasoning node."""
     llm = create_llm()
-    tools = [get_current_time, calculate_simple_math, search_web]
+    tools = [get_current_time, calculate_simple_math, search_web, search_hotels_tool]
     llm_with_tools = llm.bind_tools(tools)
     
     # System prompt
-    system_prompt = """You are a helpful AI assistant for BookedAI. You can:
-    
-    1. Get the current time and date
-    2. Perform simple mathematical calculations
-    3. Search the web for information (mock implementation)
-    
-    Be helpful, accurate, and concise in your responses. If you need to use tools, explain what you're doing.
-    If you're unsure about something, ask for clarification.
-    """
+    system_prompt = """You are a helpful AI assistant for BookedAI, specializing in travel assistance. You have access to the following tools:
+
+1. **get_current_time()** - Get the current date and time
+2. **calculate_simple_math(expression)** - Perform arithmetic calculations  
+3. **search_web(query)** - Search for general information (mock implementation)
+4. **search_hotels_tool(location, check_in_date, check_out_date, adults, children, max_results)** - Search for hotels and accommodations
+
+**Hotel Search Capabilities:**
+- Search hotels in any city or location worldwide
+- Dates must be in YYYY-MM-DD format (e.g., "2024-12-15")
+- Can specify number of adult and child guests
+- Returns hotel names, ratings, locations, and pricing information
+
+**Important Guidelines:**
+- Always validate dates are in the correct format and logical (check-out after check-in, not in the past)
+- When users request hotel searches, use the search_hotels_tool with appropriate parameters
+- If users provide incomplete information, ask clarifying questions about:
+  - Specific dates (if they say "next month" or "December", ask for exact dates)
+  - Number of guests (adults and children)
+  - Location (if ambiguous, ask for city name)
+- Be helpful, accurate, and conversational in your responses
+- Format hotel results in a user-friendly way
+- If you encounter errors, explain them clearly and suggest corrections
+
+**Example interactions:**
+- "Find hotels in Tokyo for December 15-22" → Ask for number of guests, then search
+- "Hotels in Paris for 2 adults, December 15-17" → Use search_hotels_tool with those parameters
+- "What time is it?" → Use get_current_time tool
+- "Calculate 25 * 4" → Use calculate_simple_math tool
+
+Be conversational and helpful while being precise with tool usage."""
     
     # Create messages with system prompt
     messages = [HumanMessage(content=system_prompt)] + state["messages"]
@@ -115,7 +211,7 @@ def should_continue(state: AgentState) -> str:
 def create_graph():
     """Create and configure the LangGraph workflow."""
     # Initialize tools
-    tools = [get_current_time, calculate_simple_math, search_web]
+    tools = [get_current_time, calculate_simple_math, search_web, search_hotels_tool]
     tool_node = ToolNode(tools)
     
     # Create the graph
