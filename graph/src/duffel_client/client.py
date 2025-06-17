@@ -1,188 +1,157 @@
 """
-Main HTTP client for Duffel API interactions.
+Duffel API HTTP client with authentication and error handling.
 """
+import httpx
 import asyncio
 from typing import Dict, Any, Optional, Union
-import httpx
-from pydantic import ValidationError
+from datetime import datetime, timedelta
 
 from ..config import config
-from .models.common import DuffelError, DuffelResponse
 
 
 class DuffelAPIError(Exception):
-    """Exception raised for Duffel API errors."""
+    """Duffel API error exception."""
     
-    def __init__(self, error: DuffelError, status_code: int = None):
+    def __init__(self, error: Any, status_code: Optional[int] = None):
         self.error = error
         self.status_code = status_code
-        super().__init__(str(error))
+        
+        # Extract error message
+        if hasattr(error, 'detail'):
+            message = error.detail
+        elif hasattr(error, 'title'):
+            message = error.title
+        elif isinstance(error, dict):
+            message = error.get('detail') or error.get('message') or str(error)
+        else:
+            message = str(error)
+        
+        super().__init__(message)
+    
+    def __str__(self):
+        return f"Duffel API Error: {super().__str__()}"
 
 
 class DuffelClient:
-    """HTTP client for Duffel API."""
+    """HTTP client for the Duffel API."""
     
-    def __init__(self, api_token: str = None, base_url: str = None):
-        """Initialize the Duffel client.
-        
-        Args:
-            api_token: Duffel API token. If None, uses config.DUFFEL_API_TOKEN
-            base_url: Duffel API base URL. If None, uses config.DUFFEL_BASE_URL
-        """
-        self.api_token = api_token or config.DUFFEL_API_TOKEN
-        self.base_url = base_url or config.DUFFEL_BASE_URL
-        
-        if not self.api_token:
-            raise ValueError("Duffel API token is required")
-        
-        # Configure HTTP client
-        self.client = httpx.AsyncClient(
-            base_url=self.base_url,
-            headers=self._get_headers(),
-            timeout=config.REQUEST_TIMEOUT,
-        )
+    def __init__(self):
+        self._client = None
     
-    def _get_headers(self) -> Dict[str, str]:
-        """Get headers for API requests."""
+    @property
+    def client(self) -> httpx.AsyncClient:
+        """Get or create HTTP client with proper configuration."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=config.DUFFEL_BASE_URL,
+                timeout=httpx.Timeout(config.REQUEST_TIMEOUT),
+                headers=self._get_default_headers()
+            )
+        return self._client
+    
+    def _get_default_headers(self) -> Dict[str, str]:
+        """Get default headers for API requests."""
         return {
-            "Authorization": f"Bearer {self.api_token}",
-            "Content-Type": "application/json",
+            "Authorization": f"Bearer {config.DUFFEL_API_TOKEN}",
             "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Accept-Encoding": "gzip",
             "Duffel-Version": config.DUFFEL_API_VERSION,
-            "User-Agent": "BookedAI-LangGraph/1.0",
+            "User-Agent": "BookedAI-Agent/1.0"
         }
     
-    async def _make_request(
+    async def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Make GET request to Duffel API."""
+        return await self._request("GET", endpoint, params=params)
+    
+    async def post(self, endpoint: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Make POST request to Duffel API."""
+        return await self._request("POST", endpoint, json=data)
+    
+    async def _request(
         self,
         method: str,
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
-        json_data: Optional[Dict[str, Any]] = None,
-        retries: int = None,
+        json: Optional[Dict[str, Any]] = None,
+        retries: int = 0
     ) -> Dict[str, Any]:
-        """Make a request to the Duffel API with retry logic.
-        
-        Args:
-            method: HTTP method (GET, POST, etc.)
-            endpoint: API endpoint (without base URL)
-            params: Query parameters
-            json_data: JSON body data
-            retries: Number of retries (defaults to config.MAX_RETRIES)
+        """Make HTTP request with error handling and retries."""
+        try:
+            # Remove leading slash if present to avoid double slashes
+            endpoint = endpoint.lstrip('/')
             
-        Returns:
-            Parsed JSON response
+            response = await self.client.request(
+                method=method,
+                url=endpoint,
+                params=params,
+                json=json
+            )
             
-        Raises:
-            DuffelAPIError: For API errors
-            httpx.HTTPError: For HTTP errors
-        """
-        if retries is None:
-            retries = config.MAX_RETRIES
-        
-        last_exception = None
-        
-        for attempt in range(retries + 1):
-            try:
-                response = await self.client.request(
-                    method=method,
-                    url=endpoint,
-                    params=params,
-                    json=json_data,
-                )
-                
-                # Check for successful response
-                if response.is_success:
-                    return response.json()
-                
-                # Handle API errors
-                if response.status_code >= 400:
-                    try:
-                        error_data = response.json()
-                        if "errors" in error_data and error_data["errors"]:
-                            # Duffel returns errors as a list
-                            error_info = error_data["errors"][0]
-                            error = DuffelError(**error_info)
-                        else:
-                            # Generic error
-                            error = DuffelError(
-                                type="api_error",
-                                title=f"HTTP {response.status_code}",
-                                detail=response.text or "Unknown error",
-                                status=response.status_code
-                            )
-                        raise DuffelAPIError(error, response.status_code)
-                    except (ValidationError, KeyError):
-                        # Fallback for unexpected error format
-                        error = DuffelError(
-                            type="api_error", 
-                            title=f"HTTP {response.status_code}",
-                            detail=response.text,
-                            status=response.status_code
-                        )
-                        raise DuffelAPIError(error, response.status_code)
-                
-            except httpx.RequestError as e:
-                last_exception = e
-                if attempt < retries:
-                    # Wait before retrying (exponential backoff)
-                    wait_time = 2 ** attempt
-                    await asyncio.sleep(wait_time)
-                    continue
-                else:
-                    raise
-            except DuffelAPIError:
-                # Don't retry API errors (client errors)
-                raise
-        
-        # If we get here, all retries failed
-        if last_exception:
-            raise last_exception
+            # Check for HTTP errors
+            if response.status_code >= 400:
+                await self._handle_error_response(response)
+            
+            return response.json()
+            
+        except httpx.HTTPStatusError as e:
+            await self._handle_error_response(e.response)
+        except httpx.RequestError as e:
+            if retries < config.MAX_RETRIES:
+                # Exponential backoff
+                delay = 2 ** retries
+                await asyncio.sleep(delay)
+                return await self._request(method, endpoint, params, json, retries + 1)
+            else:
+                raise DuffelAPIError(f"Request failed after {config.MAX_RETRIES} retries: {e}")
+        except Exception as e:
+            raise DuffelAPIError(f"Unexpected error: {e}")
     
-    async def get(
-        self, 
-        endpoint: str, 
-        params: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Make a GET request."""
-        return await self._make_request("GET", endpoint, params=params)
-    
-    async def post(
-        self, 
-        endpoint: str, 
-        json_data: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Make a POST request."""
-        return await self._make_request("POST", endpoint, params=params, json_data=json_data)
+    async def _handle_error_response(self, response: httpx.Response) -> None:
+        """Handle error responses from the API."""
+        try:
+            error_data = response.json()
+            
+            # Duffel API returns errors in a specific format
+            if "errors" in error_data:
+                errors = error_data["errors"]
+                if errors and len(errors) > 0:
+                    raise DuffelAPIError(errors[0], response.status_code)
+            
+            # Fallback error handling
+            raise DuffelAPIError({
+                "type": "http_error",
+                "title": f"HTTP {response.status_code}",
+                "detail": error_data.get("message", response.text)
+            }, response.status_code)
+            
+        except Exception:
+            # If we can't parse the error response, use status code
+            raise DuffelAPIError({
+                "type": "http_error",
+                "title": f"HTTP {response.status_code}",
+                "detail": response.text or "Unknown error"
+            }, response.status_code)
     
     async def close(self):
         """Close the HTTP client."""
-        await self.client.aclose()
-    
-    async def __aenter__(self):
-        """Async context manager entry."""
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
-        await self.close()
+        if self._client:
+            await self._client.aclose()
 
 
-# Singleton client instance
+# Global client instance
 _client: Optional[DuffelClient] = None
 
 
 def get_client() -> DuffelClient:
-    """Get or create a singleton Duffel client instance."""
+    """Get global Duffel client instance."""
     global _client
     if _client is None:
         _client = DuffelClient()
     return _client
 
 
-async def close_client():
-    """Close the singleton client instance."""
+def set_client(client: DuffelClient):
+    """Set global Duffel client instance."""
     global _client
-    if _client is not None:
-        await _client.close()
-        _client = None 
+    _client = client 

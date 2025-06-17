@@ -94,34 +94,42 @@ class HotelSearchRequest(BaseModel):
     limit: int = Field(10, ge=1, le=50, description="Maximum number of results")
     sort_by: str = Field("price", description="Sort criteria (price, rating, distance)")
     
-    def to_duffel_params(self) -> Dict[str, Any]:
-        """Convert to Duffel API request parameters."""
-        params = {
-            "location": self.location,
-            "check_in_date": self.dates.check_in.isoformat(),
-            "check_out_date": self.dates.check_out.isoformat(),
-            "guests": [
-                {"type": "adult"} for _ in range(self.guests.adults)
-            ] + [
-                {"type": "child"} for _ in range(self.guests.children)
-            ],
-            "limit": self.limit,
-            "sort": self.sort_by,
+    def to_duffel_request(self) -> Dict[str, Any]:
+        """Convert to Duffel API POST request body."""
+        from ..endpoints.stays import get_coordinates_for_location
+        
+        # Get coordinates for the location
+        coordinates = get_coordinates_for_location(self.location)
+        if not coordinates:
+            raise ValueError(f"Could not find coordinates for location: {self.location}")
+        
+        # Build guests array
+        guests = []
+        for _ in range(self.guests.adults):
+            guests.append({"type": "adult"})
+        for _ in range(self.guests.children):
+            guests.append({"type": "child"})
+        
+        # Build the request body according to Duffel API schema
+        request_body = {
+            "data": {
+                "location": {
+                    "radius": 5,  # 5km radius
+                    "geographic_coordinates": {
+                        "latitude": coordinates["latitude"],
+                        "longitude": coordinates["longitude"]
+                    }
+                },
+                "check_in_date": self.dates.check_in.isoformat(),
+                "check_out_date": self.dates.check_out.isoformat(),
+                "guests": guests,
+                "rooms": 1,  # For now, assume 1 room
+                "mobile": False,
+                "free_cancellation_only": False
+            }
         }
         
-        if self.max_price:
-            params["max_total_amount"] = {
-                "amount": self.max_price.amount,
-                "currency": self.max_price.currency
-            }
-        
-        if self.min_star_rating:
-            params["min_star_rating"] = self.min_star_rating
-            
-        if self.amenities:
-            params["amenities"] = self.amenities
-        
-        return params
+        return request_body
 
 
 class HotelSearchResponse(DuffelResponse):

@@ -10,6 +10,21 @@ from ..models.stays import HotelSearchRequest, HotelSearchResponse, Hotel, Room,
 from ..models.common import Money, Address, Coordinates, DateRange, Guest
 
 
+# Simple city coordinates mapping for demo purposes
+CITY_COORDINATES = {
+    "sydney": {"latitude": -33.8688, "longitude": 151.2093},
+    "melbourne": {"latitude": -37.8136, "longitude": 144.9631},
+    "brisbane": {"latitude": -27.4705, "longitude": 153.0260},
+    "perth": {"latitude": -31.9505, "longitude": 115.8605},
+    "adelaide": {"latitude": -34.9285, "longitude": 138.6007},
+    "london": {"latitude": 51.5074, "longitude": -0.1278},
+    "paris": {"latitude": 48.8566, "longitude": 2.3522},
+    "new york": {"latitude": 40.7128, "longitude": -74.0060},
+    "tokyo": {"latitude": 35.6762, "longitude": 139.6503},
+    "singapore": {"latitude": 1.3521, "longitude": 103.8198},
+}
+
+
 class StaysEndpoint:
     """Handles Duffel Stays API operations."""
     
@@ -29,11 +44,11 @@ class StaysEndpoint:
             DuffelAPIError: For API errors
         """
         try:
-            # Convert search request to Duffel API parameters
-            params = request.to_duffel_params()
+            # Convert search request to Duffel API JSON body
+            request_data = request.to_duffel_request()
             
-            # Make API request
-            response_data = await self.client.get("/v2/stays/search", params=params)
+            # Make POST request to Duffel Stays API
+            response_data = await self.client.post("/stays/search", data=request_data)
             
             # Parse response into our models
             hotels = self._parse_hotels_response(response_data)
@@ -47,13 +62,11 @@ class StaysEndpoint:
             raise
         except Exception as e:
             # Wrap unexpected errors
-            raise DuffelAPIError(
-                error=type('DuffelError', (), {
-                    'type': 'client_error',
-                    'title': 'Hotel search failed',
-                    'detail': str(e)
-                })()
-            )
+            raise DuffelAPIError({
+                'type': 'client_error',
+                'title': 'Hotel search failed',
+                'detail': str(e)
+            })
     
     def _parse_hotels_response(self, response_data: Dict[str, Any]) -> List[Hotel]:
         """Parse Duffel API response into Hotel models.
@@ -66,10 +79,12 @@ class StaysEndpoint:
         """
         hotels = []
         
-        # Duffel returns data as a list of accommodation objects
-        for hotel_data in response_data.get("data", []):
+        # Duffel returns search results in data.results array
+        results = response_data.get("data", {}).get("results", [])
+        
+        for result_data in results:
             try:
-                hotel = self._parse_hotel(hotel_data)
+                hotel = self._parse_hotel_from_search_result(result_data)
                 hotels.append(hotel)
             except Exception as e:
                 # Log parsing error but continue with other hotels
@@ -78,63 +93,92 @@ class StaysEndpoint:
         
         return hotels
     
-    def _parse_hotel(self, hotel_data: Dict[str, Any]) -> Hotel:
-        """Parse a single hotel from API response.
+    def _parse_hotel_from_search_result(self, result_data: Dict[str, Any]) -> Hotel:
+        """Parse a single hotel from search result.
         
         Args:
-            hotel_data: Raw hotel data from API
+            result_data: Raw search result data from API
             
         Returns:
             Parsed Hotel object
         """
-        # Parse basic hotel information
-        hotel_id = hotel_data.get("id", "")
-        name = hotel_data.get("name", "")
-        description = hotel_data.get("description")
+        # Duffel search results have accommodation data nested
+        accommodation = result_data.get("accommodation", {})
         
-        # Parse address
+        # Parse basic hotel information
+        hotel_id = accommodation.get("id", "")
+        name = accommodation.get("name", "")
+        description = accommodation.get("description")
+        
+        # Parse location
         address = None
-        if "address" in hotel_data and hotel_data["address"]:
-            address_data = hotel_data["address"]
+        coordinates = None
+        location_data = accommodation.get("location", {})
+        
+        if "address" in location_data:
+            address_data = location_data["address"]
             address = Address(
                 line_one=address_data.get("line_one"),
                 line_two=address_data.get("line_two"),
-                city=address_data.get("city"),
+                city=address_data.get("city_name"),
                 region=address_data.get("region"),
                 postal_code=address_data.get("postal_code"),
                 country_code=address_data.get("country_code"),
             )
         
-        # Parse coordinates
-        coordinates = None
-        if "coordinates" in hotel_data and hotel_data["coordinates"]:
-            coord_data = hotel_data["coordinates"]
+        if "geographic_coordinates" in location_data:
+            coord_data = location_data["geographic_coordinates"]
             coordinates = Coordinates(
                 latitude=coord_data["latitude"],
                 longitude=coord_data["longitude"]
             )
         
         # Parse ratings
-        star_rating = hotel_data.get("star_rating")
-        guest_rating = hotel_data.get("guest_rating")
-        review_count = hotel_data.get("review_count")
+        star_rating = accommodation.get("rating")
+        guest_rating = accommodation.get("review_score")
         
         # Parse amenities
         amenities = []
-        for amenity_data in hotel_data.get("amenities", []):
+        for amenity_data in accommodation.get("amenities", []):
             amenity = Amenity(
-                id=amenity_data.get("id", ""),
-                name=amenity_data.get("name", ""),
-                category=amenity_data.get("category")
+                id=amenity_data.get("type", ""),
+                name=amenity_data.get("description", amenity_data.get("type", "")),
+                category=amenity_data.get("type")
             )
             amenities.append(amenity)
         
         # Parse images
-        images = hotel_data.get("images", [])
+        images = []
+        for photo in accommodation.get("photos", []):
+            if photo.get("url"):
+                images.append(photo["url"])
         
-        # Parse rooms and rates
+        # Parse room information from search result
         rooms = []
-        for room_data in hotel_data.get("rooms", []):
+        
+        # Get cheapest rate info from search result
+        cheapest_rate_amount = result_data.get("cheapest_rate_total_amount")
+        cheapest_rate_currency = result_data.get("cheapest_rate_currency")
+        
+        if cheapest_rate_amount and cheapest_rate_currency:
+            # Create a simplified room with the cheapest rate
+            rate = Rate(
+                total_amount=Money(
+                    amount=cheapest_rate_amount,
+                    currency=cheapest_rate_currency
+                )
+            )
+            
+            # Create a basic room entry
+            room = Room(
+                id=f"{hotel_id}_basic",
+                name="Standard Room",
+                rate=rate
+            )
+            rooms.append(room)
+        
+        # Also parse detailed rooms if available
+        for room_data in accommodation.get("rooms", []):
             room = self._parse_room(room_data)
             rooms.append(room)
         
@@ -146,10 +190,9 @@ class StaysEndpoint:
             coordinates=coordinates,
             star_rating=star_rating,
             guest_rating=guest_rating,
-            review_count=review_count,
             amenities=amenities,
             images=images,
-            rooms=rooms
+            rooms=rooms or [Room(id=f"{hotel_id}_unknown", name="Room", rate=Rate(total_amount=Money(amount="0", currency="USD")))]
         )
     
     def _parse_room(self, room_data: Dict[str, Any]) -> Room:
@@ -166,23 +209,29 @@ class StaysEndpoint:
         name = room_data.get("name", "")
         description = room_data.get("description")
         
-        bed_count = room_data.get("bed_count")
-        bed_type = room_data.get("bed_type")
-        max_occupancy = room_data.get("max_occupancy")
-        size_sqm = room_data.get("size_sqm")
+        # Parse bed information
+        beds = room_data.get("beds", [])
+        bed_count = sum(bed.get("count", 1) for bed in beds)
+        bed_type = beds[0].get("type") if beds else None
         
         # Parse room amenities
         amenities = []
         for amenity_data in room_data.get("amenities", []):
             amenity = Amenity(
-                id=amenity_data.get("id", ""),
-                name=amenity_data.get("name", ""),
-                category=amenity_data.get("category")
+                id=amenity_data.get("type", ""),
+                name=amenity_data.get("description", amenity_data.get("type", "")),
+                category=amenity_data.get("type")
             )
             amenities.append(amenity)
         
-        # Parse rate information
-        rate = self._parse_rate(room_data.get("rate", {}))
+        # Parse rates - use the first available rate
+        rates = room_data.get("rates", [])
+        if rates:
+            rate_data = rates[0]  # Take first rate
+            rate = self._parse_rate(rate_data)
+        else:
+            # Fallback rate
+            rate = Rate(total_amount=Money(amount="0", currency="USD"))
         
         return Room(
             id=room_id,
@@ -190,8 +239,6 @@ class StaysEndpoint:
             description=description,
             bed_count=bed_count,
             bed_type=bed_type,
-            max_occupancy=max_occupancy,
-            size_sqm=size_sqm,
             amenities=amenities,
             rate=rate
         )
@@ -206,46 +253,45 @@ class StaysEndpoint:
             Parsed Rate object
         """
         # Parse total amount
-        total_amount_data = rate_data.get("total_amount", {})
         total_amount = Money(
-            amount=total_amount_data.get("amount", "0"),
-            currency=total_amount_data.get("currency", "USD")
+            amount=rate_data.get("total_amount", "0"),
+            currency=rate_data.get("total_currency", "USD")
         )
         
         # Parse optional amounts
         base_amount = None
-        if "base_amount" in rate_data and rate_data["base_amount"]:
-            base_data = rate_data["base_amount"]
+        if rate_data.get("base_amount"):
             base_amount = Money(
-                amount=base_data.get("amount", "0"),
-                currency=base_data.get("currency", "USD")
+                amount=rate_data.get("base_amount", "0"),
+                currency=rate_data.get("base_currency", "USD")
             )
         
         tax_amount = None
-        if "tax_amount" in rate_data and rate_data["tax_amount"]:
-            tax_data = rate_data["tax_amount"]
+        if rate_data.get("tax_amount"):
             tax_amount = Money(
-                amount=tax_data.get("amount", "0"),
-                currency=tax_data.get("currency", "USD")
+                amount=rate_data.get("tax_amount", "0"),
+                currency=rate_data.get("tax_currency", "USD")
             )
-        
-        # Parse fees
-        fees = []
-        for fee_data in rate_data.get("fees", []):
-            fee = Money(
-                amount=fee_data.get("amount", "0"),
-                currency=fee_data.get("currency", "USD")
-            )
-            fees.append(fee)
         
         return Rate(
             total_amount=total_amount,
             base_amount=base_amount,
             tax_amount=tax_amount,
-            fees=fees if fees else None,
-            cancellation_policy=rate_data.get("cancellation_policy"),
             refundable=rate_data.get("refundable")
         )
+
+
+def get_coordinates_for_location(location: str) -> Optional[Dict[str, float]]:
+    """Get coordinates for a location string.
+    
+    Args:
+        location: Location name (city, etc.)
+        
+    Returns:
+        Dictionary with latitude and longitude, or None if not found
+    """
+    location_lower = location.lower().strip()
+    return CITY_COORDINATES.get(location_lower)
 
 
 # Convenience function for direct hotel search
