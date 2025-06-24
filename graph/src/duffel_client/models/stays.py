@@ -4,9 +4,12 @@ Pydantic models for Duffel Stays API (hotels/accommodations).
 from datetime import date, datetime
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field, validator
+import asyncio
+import logging
 
 from .common import Money, Location, Address, Coordinates, DateRange, Guest, DuffelResponse
 
+logger = logging.getLogger(__name__)
 
 class Amenity(BaseModel):
     """Hotel or room amenity."""
@@ -94,12 +97,13 @@ class HotelSearchRequest(BaseModel):
     limit: int = Field(10, ge=1, le=50, description="Maximum number of results")
     sort_by: str = Field("price", description="Sort criteria (price, rating, distance)")
     
-    def to_duffel_request(self) -> Dict[str, Any]:
+    async def to_duffel_request(self) -> Dict[str, Any]:
         """Convert to Duffel API POST request body."""
-        from ..endpoints.stays import get_coordinates_for_location
+        from ..endpoints.stays import get_geocode
         
         # Get coordinates for the location
-        coordinates = get_coordinates_for_location(self.location)
+        coordinates = await get_geocode(self.location)
+        logger.info(f"Coordinates: {coordinates}")
         if not coordinates:
             raise ValueError(f"Could not find coordinates for location: {self.location}")
         
