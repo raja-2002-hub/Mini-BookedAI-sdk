@@ -99,10 +99,10 @@ class HotelSearchRequest(BaseModel):
     
     async def to_duffel_request(self) -> Dict[str, Any]:
         """Convert to Duffel API POST request body."""
-        from ..endpoints.stays import get_coordinates_for_location
+        from ..endpoints.stays import get_geocode
         
         # Get coordinates for the location
-        coordinates = await get_coordinates_for_location(self.location)
+        coordinates = await get_geocode(self.location)
         logger.info(f"Coordinates: {coordinates}")
         if not coordinates:
             raise ValueError(f"Could not find coordinates for location: {self.location}")

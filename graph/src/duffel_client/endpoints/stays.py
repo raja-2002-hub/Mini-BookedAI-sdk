@@ -272,7 +272,7 @@ class StaysEndpoint:
             refundable=rate_data.get("refundable")
         )
 
-def sync_geocode(location: str) -> Optional[Dict[str, float]]:
+async def get_geocode(location: str) -> Optional[Dict[str, float]]:
     """
     Get coordinates for a location string using geopy.
 
@@ -280,21 +280,18 @@ def sync_geocode(location: str) -> Optional[Dict[str, float]]:
         location: Location name (city, etc.)
 
     Returns:
-        Dictionary with latitude and longitude, or None if not found
+        Dictionary with latitude and longitude, 
+        or None if not found
     """
     try:
-        loc = geolocator.geocode(location)
+        logger.info(f"Geocoding {location}")
+        loc = await asyncio.to_thread(geolocator.geocode, location)
+        logger.info(f"Geocoding result: {loc}")
         if loc:
             return {"latitude": loc.latitude, "longitude": loc.longitude}
     except Exception as e:
         logger.error(f"Geocoding error: {e}")
     return None
-
-async def get_coordinates_for_location(location: str) -> Optional[Dict[str, float]]:
-    """
-    Async wrapper to run the blocking geocoding call in a thread.
-    """
-    return await asyncio.to_thread(sync_geocode, location)
 
 # Convenience function for direct hotel search
 async def search_hotels(
