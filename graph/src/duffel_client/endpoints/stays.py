@@ -5,24 +5,13 @@ from typing import List, Dict, Any, Optional
 from datetime import date
 import asyncio
 
+from geopy.geocoders import Nominatim
+
 from ..client import DuffelClient, DuffelAPIError
 from ..models.stays import HotelSearchRequest, HotelSearchResponse, Hotel, Room, Rate, Amenity
 from ..models.common import Money, Address, Coordinates, DateRange, Guest
 
-
-# Simple city coordinates mapping for demo purposes
-CITY_COORDINATES = {
-    "sydney": {"latitude": -33.8688, "longitude": 151.2093},
-    "melbourne": {"latitude": -37.8136, "longitude": 144.9631},
-    "brisbane": {"latitude": -27.4705, "longitude": 153.0260},
-    "perth": {"latitude": -31.9505, "longitude": 115.8605},
-    "adelaide": {"latitude": -34.9285, "longitude": 138.6007},
-    "london": {"latitude": 51.5074, "longitude": -0.1278},
-    "paris": {"latitude": 48.8566, "longitude": 2.3522},
-    "new york": {"latitude": 40.7128, "longitude": -74.0060},
-    "tokyo": {"latitude": 35.6762, "longitude": 139.6503},
-    "singapore": {"latitude": 1.3521, "longitude": 103.8198},
-}
+geolocator = Nominatim(user_agent="booked-ai")
 
 
 class StaysEndpoint:
@@ -45,7 +34,7 @@ class StaysEndpoint:
         """
         try:
             # Convert search request to Duffel API JSON body
-            request_data = request.to_duffel_request()
+            request_data = await request.to_duffel_request()
             
             # Make POST request to Duffel Stays API
             response_data = await self.client.post("/stays/search", data=request_data)
@@ -280,19 +269,29 @@ class StaysEndpoint:
             refundable=rate_data.get("refundable")
         )
 
+def sync_geocode(location: str) -> Optional[Dict[str, float]]:
+    """
+    Get coordinates for a location string using geopy.
 
-def get_coordinates_for_location(location: str) -> Optional[Dict[str, float]]:
-    """Get coordinates for a location string.
-    
     Args:
         location: Location name (city, etc.)
-        
+
     Returns:
         Dictionary with latitude and longitude, or None if not found
     """
-    location_lower = location.lower().strip()
-    return CITY_COORDINATES.get(location_lower)
+    try:
+        loc = geolocator.geocode(location)
+        if loc:
+            return {"latitude": loc.latitude, "longitude": loc.longitude}
+    except Exception as e:
+        print(f"Geocoding error: {e}")
+    return None
 
+async def get_coordinates_for_location(location: str) -> Optional[Dict[str, float]]:
+    """
+    Async wrapper to run the blocking geocoding call in a thread.
+    """
+    return await asyncio.to_thread(sync_geocode, location)
 
 # Convenience function for direct hotel search
 async def search_hotels(
