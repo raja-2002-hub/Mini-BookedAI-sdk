@@ -1,6 +1,7 @@
 """
 Duffel Stays API endpoint for hotel search functionality.
 """
+import logging
 from typing import List, Dict, Any, Optional
 from datetime import date
 import asyncio
@@ -12,6 +13,8 @@ from ..models.stays import HotelSearchRequest, HotelSearchResponse, Hotel, Room,
 from ..models.common import Money, Address, Coordinates, DateRange, Guest
 
 geolocator = Nominatim(user_agent="booked-ai")
+
+logger = logging.getLogger(__name__)
 
 
 class StaysEndpoint:
@@ -284,7 +287,7 @@ def sync_geocode(location: str) -> Optional[Dict[str, float]]:
         if loc:
             return {"latitude": loc.latitude, "longitude": loc.longitude}
     except Exception as e:
-        print(f"Geocoding error: {e}")
+        logger.error(f"Geocoding error: {e}")
     return None
 
 async def get_coordinates_for_location(location: str) -> Optional[Dict[str, float]]:
