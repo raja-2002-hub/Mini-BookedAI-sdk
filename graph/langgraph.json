@@ -4,8 +4,11 @@
     "agent": {
       "path": "src.agent.graph:graph",
       "title": "BookedAI Agent",
-      "description": "A helpful AI assistant for BookedAI with tools for time, math, and web search"
+      "description": "Travel agent with generative UI"
     }
   },
+  "ui": {
+    "agent": "src/agent/ui.tsx"
+  },
   "env": ".env"
-} 
+}

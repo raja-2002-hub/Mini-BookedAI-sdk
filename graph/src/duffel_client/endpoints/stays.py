@@ -4,7 +4,7 @@ Duffel Stays API endpoint for hotel search functionality.
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import date
-import asyncio
+import logging
 
 from geopy.geocoders import Nominatim
 
@@ -12,10 +12,9 @@ from ..client import DuffelClient, DuffelAPIError
 from ..models.stays import HotelSearchRequest, HotelSearchResponse, Hotel, Room, Rate, Amenity
 from ..models.common import Money, Address, Coordinates, DateRange, Guest
 
-geolocator = Nominatim(user_agent="booked-ai")
 
 logger = logging.getLogger(__name__)
-
+geolocator = Nominatim(user_agent="booked-ai")
 
 class StaysEndpoint:
     """Handles Duffel Stays API operations."""
@@ -80,7 +79,7 @@ class StaysEndpoint:
                 hotels.append(hotel)
             except Exception as e:
                 # Log parsing error but continue with other hotels
-                print(f"Warning: Failed to parse hotel data: {e}")
+                logger.warning(f"Failed to parse hotel data: {e}")
                 continue
         
         return hotels

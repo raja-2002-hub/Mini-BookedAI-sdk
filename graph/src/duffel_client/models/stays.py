@@ -150,28 +150,47 @@ class HotelSearchResponse(DuffelResponse):
         """Get the number of hotels returned."""
         return len(self.data)
     
-    def format_for_display(self, max_results: int = 5) -> str:
-        """Format the search results for display in chat."""
+    def format_for_json(self, max_results: int = 5) -> Dict[str, Any]:
+        """Format the search results as JSON data for UI components."""
         if not self.hotels:
-            return "No hotels found for your search criteria."
+            return {
+                "hotels": [],
+                "summary": "No hotels found for your search criteria.",
+                "count": 0
+            }
         
-        results = []
-        for i, hotel in enumerate(self.hotels[:max_results], 1):
-            min_rate = hotel.min_rate
-            price_str = f"from {min_rate}" if min_rate else "Price unavailable"
-            
+        hotel_data = []
+        for hotel in self.hotels[:max_results]:
+            # Get location string
             location_str = ""
             if hotel.address and hotel.address.city:
-                location_str = f" in {hotel.address.city}"
+                location_str = hotel.address.city
             
-            rating_str = ""
-            if hotel.star_rating:
-                rating_str = f" ({hotel.star_rating}★)"
+            # Get price string
+            price_str = str(hotel.min_rate.total_amount) if hotel.min_rate else "Price unavailable"
             
-            results.append(f"{i}. {hotel.name}{rating_str}{location_str} - {price_str}")
+            # Get amenities
+            amenities = [amenity.name for amenity in hotel.amenities[:5]] if hotel.amenities else []
+            
+            # Get first image
+            image = hotel.images[0] if hotel.images else ""
+            
+            hotel_data.append({
+                "name": hotel.name,
+                "rating": hotel.star_rating or 0,
+                "price": price_str,
+                "location": location_str,
+                "image": image,
+                "amenities": amenities,
+                "description": hotel.description or ""
+            })
         
-        total_str = f" (showing {max_results} of {self.count})" if self.count > max_results else ""
-        return f"Found {self.count} hotels{total_str}:\n\n" + "\n".join(results)
+        return {
+            "hotels": hotel_data,
+            "summary": f"Found {self.count} hotels in your search",
+            "count": self.count,
+            "showing": min(max_results, self.count)
+        }
 
 
 class StayBookingRequest(BaseModel):
