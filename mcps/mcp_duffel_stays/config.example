@@ -1,0 +1,15 @@
+# Duffel API Configuration for Stays/Hotels Search
+# Get your API token from https://duffel.com/dashboard
+export DUFFEL_API_TOKEN=your_duffel_api_token_here
+
+# Optional: Set logging level
+export RUST_LOG=info
+
+# Optional: Set server port (default: 3002)
+export PORT=3002
+
+# To use this configuration:
+# 1. Copy this file to config.env
+# 2. Replace your_duffel_api_token_here with your actual token
+# 3. Source the file: source config.env
+# 4. Run the server: cargo run 
