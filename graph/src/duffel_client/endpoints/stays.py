@@ -2,9 +2,9 @@
 Duffel Stays API endpoint for hotel search functionality.
 """
 import logging
+import asyncio
 from typing import List, Dict, Any, Optional
 from datetime import date
-import logging
 
 from geopy.geocoders import Nominatim
 

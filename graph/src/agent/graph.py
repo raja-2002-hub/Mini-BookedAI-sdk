@@ -160,8 +160,20 @@ async def search_hotels_tool(
         return json.dumps(json_data)
         
     except DuffelAPIError as e:
-        logger.error(f"Duffel API error during hotel search: {e.error.title} - {e.error.detail}")
-        return f"Hotel search error: {e.error.title} - {e.error.detail or 'Please try again later'}"
+        logger.error(f"Duffel API error during hotel search: {e}")
+        # Handle both dictionary and object-style error formats
+        error_title = "API Error"
+        error_detail = "Please try again later"
+        
+        if hasattr(e, 'error'):
+            if isinstance(e.error, dict):
+                error_title = e.error.get('title', 'API Error')
+                error_detail = e.error.get('detail', 'Please try again later')
+            elif hasattr(e.error, 'title'):
+                error_title = e.error.title
+                error_detail = getattr(e.error, 'detail', 'Please try again later')
+        
+        return f"Hotel search error: {error_title} - {error_detail}"
     except Exception as e:
         logger.error(f"Unexpected error during hotel search: {str(e)}", exc_info=True)
         return f"Unexpected error during hotel search: {str(e)}"

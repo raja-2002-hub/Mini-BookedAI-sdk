@@ -1,13 +1,11 @@
 """
 Pydantic models for Duffel Stays API (hotels/accommodations).
 """
-from datetime import date, datetime
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field, validator
-import asyncio
+from pydantic import BaseModel, Field
 import logging
 
-from .common import Money, Location, Address, Coordinates, DateRange, Guest, DuffelResponse
+from .common import Money, Address, Coordinates, DateRange, Guest, DuffelResponse
 
 logger = logging.getLogger(__name__)
 
