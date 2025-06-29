@@ -22,9 +22,9 @@ from langgraph.prebuilt import ToolNode
 from langgraph.errors import GraphInterrupt
 
 # Import our Duffel client
-from ..duffel_client.endpoints.stays import search_hotels
-from ..duffel_client.client import DuffelAPIError
-from ..config import config
+from src.duffel_client.endpoints.stays import search_hotels
+from src.duffel_client.client import DuffelAPIError
+from src.config import config
 
 # Load environment variables
 load_dotenv()
