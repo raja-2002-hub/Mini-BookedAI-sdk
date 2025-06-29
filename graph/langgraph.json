@@ -1,14 +1,7 @@
 {
-  "dependencies": ["."],
+  "dependencies": ["./src"],
   "graphs": {
-    "agent": {
-      "path": "src.agent.graph:graph",
-      "title": "BookedAI Agent",
-      "description": "Travel agent with generative UI"
-    }
-  },
-  "ui": {
-    "agent": "src/agent/ui.tsx"
+    "agent": "./src/agent/graph.py:graph"
   },
   "env": ".env"
 }

@@ -1,0 +1,17 @@
+[variables]
+NODE_ENV = "production"
+NIXPACKS_METADATA = "node,pnpm"
+
+[phases.setup]
+nixPkgs = ["nodejs_20", "pnpm"]
+
+[phases.install]
+dependsOn = ["setup"]
+cmds = ["pnpm install --frozen-lockfile"]
+
+[phases.build] 
+dependsOn = ["install"]
+cmds = ["pnpm run build"]
+
+[start]
+cmd = "pnpm start" 

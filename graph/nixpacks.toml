@@ -1,0 +1,13 @@
+[variables]
+PYTHONPATH = "/app/src"
+NIXPACKS_METADATA = "python,uv"
+
+[phases.setup]
+nixPkgs = ["python312", "uv"]
+
+[phases.install]
+dependsOn = ["setup"]
+cmds = ["uv sync --frozen"]
+
+[start]
+cmd = "uv run langgraph dev --host 0.0.0.0 --port $PORT" 
