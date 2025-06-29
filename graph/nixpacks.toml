@@ -1,9 +1,9 @@
 [variables]
 PYTHONPATH = "/app/src"
-NIXPACKS_METADATA = "python,uv"
+NIXPACKS_METADATA = "python,uv,nodejs"
 
 [phases.setup]
-nixPkgs = ["python312", "uv"]
+nixPkgs = ["python312", "uv", "nodejs_18", "npm"]
 
 [phases.install]
 dependsOn = ["setup"]
