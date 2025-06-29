@@ -263,6 +263,38 @@ Only discuss travel related topics.
 </rules>
 """
     
+    # Check if we'll have UI components to adjust the response style
+    will_have_ui_components = False
+    if state.get("ui_enabled", True):
+        # Look for recent tool messages that would generate UI
+        for i in range(len(state["messages"]) - 1, -1, -1):
+            msg = state["messages"][i]
+            if isinstance(msg, ToolMessage):
+                try:
+                    tool_data = json.loads(msg.content)
+                    should_push, ui_type = should_push_ui_message(msg, tool_data)
+                    if should_push:
+                        will_have_ui_components = True
+                        break
+                except (json.JSONDecodeError, Exception):
+                    continue
+            elif msg.type in ["human", "ai"]:
+                break
+    
+    # Modify system prompt if UI components will be shown
+    if will_have_ui_components:
+        system_prompt += """
+
+<ui_response_style>
+Since rich UI components (hotel cards, flight results, etc.) will be displayed to show detailed information with images and structured data, keep your text response concise and conversational. Focus on:
+- Brief summary of results found
+- Key insights or recommendations
+- Next steps or questions for the user
+- Avoid describing visual details that will be shown in the UI components
+</ui_response_style>
+"""
+        logger.info("Modified system prompt for concise response due to upcoming UI components")
+
     # Create messages with system prompt
     messages = [HumanMessage(content=system_prompt)] +  state["messages"]
     for idx, msg in enumerate(messages):
