@@ -3,10 +3,14 @@ Configuration management for the LangGraph agent.
 """
 import os
 from typing import Optional
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Try to load dotenv, but don't fail if it's not available (e.g., in production)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # dotenv not available, likely in production where env vars are provided directly
+    pass
 
 class Config:
     """Application configuration."""

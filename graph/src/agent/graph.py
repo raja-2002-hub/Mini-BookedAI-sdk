@@ -6,7 +6,14 @@ from typing_extensions import TypedDict
 import os
 import logging
 from datetime import date, datetime
-from dotenv import load_dotenv
+
+# Try to load dotenv, but don't fail if it's not available (e.g., in production)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # dotenv not available, likely in production where env vars are provided directly
+    pass
 
 import json
 
@@ -25,9 +32,6 @@ from langgraph.errors import GraphInterrupt
 from src.duffel_client.endpoints.stays import search_hotels
 from src.duffel_client.client import DuffelAPIError
 from src.config import config
-
-# Load environment variables
-load_dotenv()
 
 # Configure logging
 logger = logging.getLogger(__name__)
