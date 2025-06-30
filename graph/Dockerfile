@@ -1,27 +1,24 @@
 FROM langchain/langgraph-api:3.11
 
+# Set environment variables for uv
+ENV UV_SYSTEM_PYTHON=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
+# Copy project files to expected location
+COPY . /deps/graph
 
-# -- Adding local package . --
-ADD . /deps/graph
-# -- End of local package . --
+# Install project dependencies using uv sync
+WORKDIR /deps/graph
+RUN uv sync --frozen
 
-# -- Installing all local dependencies --
-RUN PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir -c /api/constraints.txt -e /deps/*
-# -- End of local dependencies install --
+# Set the graph configuration
 ENV LANGSERVE_GRAPHS='{"agent": "/deps/graph/src/agent/graph.py:graph"}'
 
+# Ensure langgraph-api components remain accessible
+RUN mkdir -p /api/langgraph_api /api/langgraph_runtime /api/langgraph_license && \
+    touch /api/langgraph_api/__init__.py /api/langgraph_runtime/__init__.py /api/langgraph_license/__init__.py
 
-
-# -- Ensure user deps didn't inadvertently overwrite langgraph-api
-RUN mkdir -p /api/langgraph_api /api/langgraph_runtime /api/langgraph_license &&     touch /api/langgraph_api/__init__.py /api/langgraph_runtime/__init__.py /api/langgraph_license/__init__.py
-RUN PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir --no-deps -e /api
-# -- End of ensuring user deps didn't inadvertently overwrite langgraph-api --
-# -- Removing pip from the final image ~<:===~~~ --
-RUN pip uninstall -y pip setuptools wheel &&     rm -rf /usr/local/lib/python*/site-packages/pip* /usr/local/lib/python*/site-packages/setuptools* /usr/local/lib/python*/site-packages/wheel* &&     find /usr/local/bin -name "pip*" -delete || true
-# pip removal for wolfi
-RUN rm -rf /usr/lib/python*/site-packages/pip* /usr/lib/python*/site-packages/setuptools* /usr/lib/python*/site-packages/wheel* &&     find /usr/bin -name "pip*" -delete || true
-RUN uv pip uninstall --system pip setuptools wheel && rm /usr/bin/uv /usr/bin/uvx
-# -- End of pip removal --
+# Make sure our package is available in the Python path
+ENV PYTHONPATH="/deps/graph:$PYTHONPATH"
 
 WORKDIR /deps/graph

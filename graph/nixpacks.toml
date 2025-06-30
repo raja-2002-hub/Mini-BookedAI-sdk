@@ -7,6 +7,6 @@ nixPkgs = ["python312", "uv", "nodejs"]
 
 [phases.install]
 dependsOn = ["setup"]
-cmds = ["uv sync --frozen", "uv run langgraph dockerfile --output-path Dockerfile"]
+cmds = ["uv sync --frozen"]
 
-# Note: Railway will use the generated Dockerfile instead of this start command 
+# Railway will use the custom Dockerfile instead 
