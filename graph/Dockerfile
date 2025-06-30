@@ -13,7 +13,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     node --version && \
     npm --version && \
-    npx --version
+    npx --version && \
+    rm -f /usr/lib/python3.11/EXTERNALLY-MANAGED || true
 
 # Copy project files to expected location
 COPY . /deps/graph
