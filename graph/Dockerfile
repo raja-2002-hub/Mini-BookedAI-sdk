@@ -4,6 +4,13 @@ FROM langchain/langgraph-api:3.11
 ENV UV_SYSTEM_PYTHON=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# Install Node.js for UI compilation
+RUN apt-get update && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy project files to expected location
 COPY . /deps/graph
 WORKDIR /deps/graph
@@ -13,6 +20,10 @@ RUN uv pip install --system --no-cache-dir .
 
 # Set the graph configuration
 ENV LANGSERVE_GRAPHS='{"agent": "/deps/graph/src/agent/graph.py:graph"}'
+
+# Set UI environment variables for production
+ENV LANGGRAPH_UI='{"agent": "./src/agent/ui.tsx"}'
+ENV LANGGRAPH_UI_BUNDLER=true
 
 # Ensure langgraph-api components remain accessible
 RUN mkdir -p /api/langgraph_api /api/langgraph_runtime /api/langgraph_license && \
