@@ -24,21 +24,35 @@ function CustomComponent({
 }) {
   const artifact = useArtifact();
   const { values } = useStreamContext();
+  
+  console.log(`[UI RENDER] Checking for UI components for message ${message.id}`);
+  console.log("[UI RENDER] Total UI messages:", values.ui?.length || 0);
+  console.log("[UI RENDER] All UI messages:", values.ui);
+  
   const customComponents = values.ui?.filter(
     (ui) => ui.metadata?.message_id === message.id,
   );
 
+  console.log(`[UI RENDER] Found ${customComponents?.length || 0} UI components for message ${message.id}`);
+  
+  if (customComponents?.length) {
+    console.log("[UI RENDER] UI components to render:", customComponents);
+  }
+
   if (!customComponents?.length) return null;
   return (
     <Fragment key={message.id}>
-      {customComponents.map((customComponent) => (
-        <LoadExternalComponent
-          key={customComponent.id}
-          stream={thread}
-          message={customComponent}
-          meta={{ ui: customComponent, artifact }}
-        />
-      ))}
+      {customComponents.map((customComponent) => {
+        console.log(`[UI RENDER] Rendering UI component:`, customComponent);
+        return (
+          <LoadExternalComponent
+            key={customComponent.id}
+            stream={thread}
+            message={customComponent}
+            meta={{ ui: customComponent, artifact }}
+          />
+        );
+      })}
     </Fragment>
   );
 }
