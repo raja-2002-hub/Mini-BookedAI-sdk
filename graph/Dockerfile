@@ -4,7 +4,7 @@ FROM langchain/langgraph-api:3.11
 ENV UV_SYSTEM_PYTHON=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Install Node.js for UI compilation
+# Install Node.js for UI compilation (force rebuild)
 RUN apt-get update && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
