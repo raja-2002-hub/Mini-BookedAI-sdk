@@ -4,12 +4,14 @@ FROM langchain/langgraph-api:3.11
 ENV UV_SYSTEM_PYTHON=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Install Node.js for UI compilation (force rebuild)
+# Install Node.js and npm for UI compilation
 RUN apt-get update && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs && \
+    apt-get install -y nodejs npm && \
+    npm install -g npm@latest && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    node --version && npm --version && npx --version
 
 # Copy project files to expected location
 COPY . /deps/graph
