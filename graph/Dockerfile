@@ -57,15 +57,15 @@ ENV PYTHONPATH="/deps/graph:$PYTHONPATH"
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 # Patch Python runtime to ensure asyncio subprocess env is a dict (uvloop compatibility)
-RUN tee /usr/local/lib/python3.11/site-packages/sitecustomize.py > /dev/null << 'PYEOF'
+RUN cat > /usr/local/lib/python3.11/site-packages/sitecustomize.py <<'PYEOF'
 import asyncio, os
 
 _orig_create = asyncio.create_subprocess_exec
 
 async def _fixed_create(*args, **kwargs):
-    env = kwargs.get("env")
+    env = kwargs.get('env')
     if isinstance(env, os._Environ):
-        kwargs["env"] = dict(env)
+        kwargs['env'] = dict(env)
     return await _orig_create(*args, **kwargs)
 
 asyncio.create_subprocess_exec = _fixed_create
