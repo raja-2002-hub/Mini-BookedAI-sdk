@@ -14,7 +14,7 @@ RUN apt-get update && \
     node --version && \
     npm --version && \
     npx --version && \
-    rm -f /usr/lib/python3.11/EXTERNALLY-MANAGED || true
+    rm -f /usr/lib/python3.11/EXTERNALLY-MANAGED /usr/lib/python3/dist-packages/EXTERNALLY-MANAGED || true
 
 # Copy project files to expected location
 COPY . /deps/graph
@@ -52,5 +52,8 @@ RUN PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir --no-deps -
 
 # Add our project to Python path
 ENV PYTHONPATH="/deps/graph:$PYTHONPATH"
+
+# Allow pip system installs
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 WORKDIR /deps/graph 
