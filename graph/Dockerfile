@@ -27,10 +27,20 @@ ENV LANGSERVE_GRAPHS='{"agent": "/deps/graph/src/agent/graph.py:graph"}'
 
 # Set UI environment variables for production
 ENV LANGGRAPH_UI='{"agent": "./src/agent/ui.tsx"}'
-ENV LANGGRAPH_UI_BUNDLER=false
+ENV LANGGRAPH_UI_BUNDLER=true
+
+# Set explicit NODE_PATH and PATH for UI bundler subprocess
+ENV NODE_PATH=/usr/lib/node_modules
+ENV PATH=/usr/bin:$PATH
+# Ensure subprocess environment compatibility
+ENV PYTHONUNBUFFERED=1
+ENV SHELL=/bin/bash
 
 # Create required UI bundler directories
 RUN mkdir -p /deps/graph/.langgraph_api/ui
+
+# Pre-install common UI dependencies to avoid subprocess issues
+RUN npm install -g typescript @types/react @types/react-dom || true
 
 # Ensure langgraph-api components remain accessible
 RUN mkdir -p /api/langgraph_api /api/langgraph_runtime /api/langgraph_license && \
