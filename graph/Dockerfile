@@ -8,8 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 COPY . /deps/graph
 WORKDIR /deps/graph
 
-# Install dependencies using pure uv commands into system Python
-RUN uv sync --frozen --no-dev
+# Install dependencies into system Python using uv pip (needed for LangGraph compatibility)
+RUN uv pip install --system --no-cache-dir .
 
 # Set the graph configuration
 ENV LANGSERVE_GRAPHS='{"agent": "/deps/graph/src/agent/graph.py:graph"}'
