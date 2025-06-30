@@ -29,6 +29,9 @@ ENV LANGSERVE_GRAPHS='{"agent": "/deps/graph/src/agent/graph.py:graph"}'
 ENV LANGGRAPH_UI='{"agent": "./src/agent/ui.tsx"}'
 ENV LANGGRAPH_UI_BUNDLER=true
 
+# Create required UI bundler directories
+RUN mkdir -p /deps/graph/.langgraph_api/ui
+
 # Ensure langgraph-api components remain accessible
 RUN mkdir -p /api/langgraph_api /api/langgraph_runtime /api/langgraph_license && \
     touch /api/langgraph_api/__init__.py /api/langgraph_runtime/__init__.py /api/langgraph_license/__init__.py
