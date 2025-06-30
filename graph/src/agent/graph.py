@@ -202,7 +202,7 @@ def create_llm():
 
     logger.info("LLM instance created successfully with gpt-3.5-turbo")
     return ChatOpenAI(
-        model="gpt-3.5-turbo",
+        model="gpt-4o",
         temperature=0.1,
         api_key=SecretStr(api_key)
     )
