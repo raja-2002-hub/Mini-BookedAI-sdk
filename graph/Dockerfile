@@ -2,14 +2,15 @@ FROM langchain/langgraph-api:3.11
 
 # Set environment variables for uv
 ENV UV_SYSTEM_PYTHON=1
+ENV UV_PROJECT_ENVIRONMENT=/usr/local
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # Copy project files to expected location
 COPY . /deps/graph
 
-# Install project dependencies using uv sync
+# Install project dependencies using pure uv (no pip interface)
 WORKDIR /deps/graph
-RUN uv sync --frozen
+RUN uv sync --frozen --no-dev
 
 # Set the graph configuration
 ENV LANGSERVE_GRAPHS='{"agent": "/deps/graph/src/agent/graph.py:graph"}'
