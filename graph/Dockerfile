@@ -27,7 +27,7 @@ ENV LANGSERVE_GRAPHS='{"agent": "/deps/graph/src/agent/graph.py:graph"}'
 
 # Set UI environment variables for production
 ENV LANGGRAPH_UI='{"agent": "./src/agent/ui.tsx"}'
-ENV LANGGRAPH_UI_BUNDLER=true
+ENV LANGGRAPH_UI_BUNDLER=false
 
 # Create required UI bundler directories
 RUN mkdir -p /deps/graph/.langgraph_api/ui
