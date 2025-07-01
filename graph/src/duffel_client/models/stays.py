@@ -180,7 +180,8 @@ class HotelSearchResponse(DuffelResponse):
                 "location": location_str,
                 "image": image,
                 "amenities": amenities,
-                "description": hotel.description or ""
+                "description": hotel.description[:100]+"..." if hotel.description else "",
+                "id": hotel.id
             })
         
         return {

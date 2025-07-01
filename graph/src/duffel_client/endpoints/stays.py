@@ -58,6 +58,58 @@ class StaysEndpoint:
                 'title': 'Hotel search failed',
                 'detail': str(e)
             })
+        
+    async def fetch_all_rates(self, search_result_id: str) -> Dict[str, Any]:
+        """Fetch all rates for a specific search result.
+        
+        Args:
+            search_result_id: The search result ID (srr_...)
+            
+        Returns:
+            Raw API response with detailed room/rate information
+            
+        Raises:
+            DuffelAPIError: For API errors
+        """
+        try:
+            # Make POST request to Duffel Stays API
+            endpoint = f"/stays/search_results/{search_result_id}/actions/fetch_all_rates"
+            response_data = await self.client.post(endpoint, data={})
+            
+            logger.info(f"Successfully fetched rates for {search_result_id}")
+            return response_data
+        
+        except Exception as e:
+            # Wrap unexpected errors
+            logger.error(f"Error fetching rates for {search_result_id}: {e}")
+            raise DuffelAPIError(f"Failed to fetch rates: {str(e)}")
+        
+    async def create_quote(self, rate_id: str) -> dict:
+        """Create a quote for a given rate."""
+        endpoint = "/stays/quotes"
+        data = {"data": {"rate_id": rate_id}}
+        return await self.client.post(endpoint, data=data)
+    
+    async def create_booking(
+        self,
+        quote_id: str,
+        guests: list,
+        email: str,
+        stay_special_requests: str = "",
+        phone_number: str = ""
+    ) -> dict:
+        """Create a booking for a given quote."""
+        endpoint = "/stays/bookings"
+        data = {
+            "data": {
+                "quote_id": quote_id,
+                "guests": guests,
+                "email": email,
+                "stay_special_requests": stay_special_requests,
+                "phone_number": phone_number,
+            }
+        }
+        return await self.client.post(endpoint, data=data)
     
     def _parse_hotels_response(self, response_data: Dict[str, Any]) -> List[Hotel]:
         """Parse Duffel API response into Hotel models.
@@ -97,7 +149,6 @@ class StaysEndpoint:
         accommodation = result_data.get("accommodation", {})
         
         # Parse basic hotel information
-        hotel_id = accommodation.get("id", "")
         name = accommodation.get("name", "")
         description = accommodation.get("description")
         
@@ -150,6 +201,7 @@ class StaysEndpoint:
         # Get cheapest rate info from search result
         cheapest_rate_amount = result_data.get("cheapest_rate_total_amount")
         cheapest_rate_currency = result_data.get("cheapest_rate_currency")
+        hotel_id = result_data.get("id", "")
         
         if cheapest_rate_amount and cheapest_rate_currency:
             # Create a simplified room with the cheapest rate
@@ -327,3 +379,43 @@ async def search_hotels(
     )
     
     return await stays_endpoint.search_hotels(request) 
+
+async def fetch_hotel_rates(search_result_id: str) -> Dict[str, Any]:
+    """Convenience function to fetch all rates for a hotel.
+    
+    Args:
+        search_result_id: The search result ID (srr_...)
+        
+    Returns:
+        API response with detailed room/rate information
+    """
+    from ..client import get_client
+    
+    client = get_client()
+    stays_endpoint = StaysEndpoint(client)
+    
+    return await stays_endpoint.fetch_all_rates(search_result_id)
+
+async def create_quote(rate_id: str) -> dict:
+    """Convenience function to create a quote for a rate."""
+    from ..client import get_client
+
+    client = get_client()
+    stays_endpoint = StaysEndpoint(client)
+    return await stays_endpoint.create_quote(rate_id)
+
+async def create_booking(
+    quote_id: str,
+    guests: list,
+    email: str,
+    stay_special_requests: str = "",
+    phone_number: str = ""
+) -> dict:
+    """Convenience function to create a booking from a quote."""
+    from ..client import get_client
+
+    client = get_client()
+    stays_endpoint = StaysEndpoint(client)
+    return await stays_endpoint.create_booking(
+        quote_id, guests, email, stay_special_requests, phone_number
+    )

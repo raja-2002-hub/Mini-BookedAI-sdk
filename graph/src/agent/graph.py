@@ -29,7 +29,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.errors import GraphInterrupt
 
 # Import our Duffel client
-from src.duffel_client.endpoints.stays import search_hotels
+from src.duffel_client.endpoints.stays import search_hotels, fetch_hotel_rates, create_quote, create_booking
 from src.duffel_client.client import DuffelAPIError
 from src.config import config
 
@@ -190,6 +190,150 @@ async def search_hotels_tool(
     except Exception as e:
         logger.error(f"Unexpected error during hotel search: {str(e)}", exc_info=True)
         return f"Unexpected error during hotel search: {str(e)}"
+    
+@tool
+async def fetch_hotel_rates_tool(search_result_id: str) -> str:
+    """Fetch detailed room and rate information for a specific hotel.
+    
+    Args:
+        search_result_id: The search result ID from hotel search (srr_...)
+        
+    Returns:
+        JSON string with detailed room/rate information including rate IDs (rat_...)
+    """
+    logger.info(f"Fetching rates for search result: {search_result_id}")
+    
+    # Validate search_result_id format
+    if not search_result_id or not search_result_id.startswith("srr_"):
+        return "Error: search_result_id must start with 'srr_' and be a valid search result ID"
+    
+    # Check if Duffel API token is configured
+    if not config.DUFFEL_API_TOKEN:
+        logger.error("Duffel API token not configured")
+        return "Rate fetching is currently unavailable. Please configure the Duffel API token."
+    
+    try:        
+        response = await fetch_hotel_rates(search_result_id)
+        logger.info(f"Successfully fetched rates for {search_result_id}")
+        
+        return json.dumps(response)
+        
+    except DuffelAPIError as e:
+        logger.error(f"Duffel API error during rate fetch: {e}")
+        error_title = "API Error"
+        error_detail = "Please try again later"
+        
+        if hasattr(e, 'error'):
+            if isinstance(e.error, dict):
+                error_title = e.error.get('title', 'API Error')
+                error_detail = e.error.get('detail', 'Please try again later')
+            elif hasattr(e.error, 'title'):
+                error_title = e.error.title
+                error_detail = getattr(e.error, 'detail', 'Please try again later')
+        
+        return f"Rate fetch error: {error_title} - {error_detail}"
+    except Exception as e:
+        logger.error(f"Unexpected error during rate fetch: {str(e)}", exc_info=True)
+        return f"Unexpected error during rate fetch: {str(e)}"
+
+@tool
+async def create_quote_tool(rate_id: str) -> str:
+    """Create a Duffel stay quote for a given rate.
+
+    Args:
+        rate_id: The Duffel rate identifier (e.g. 'rat_XXXX').
+
+    Returns:
+        JSON string of the quote response, or an error message.
+    """
+    logger.info(f"Quote creation initiated for rate_id: {rate_id}")
+
+    # Basic validation
+    if not rate_id or not rate_id.startswith("rat_"):
+        return "Error: `rate_id` must start with 'rat_' and be a valid Duffel rate ID."
+
+    if not config.DUFFEL_API_TOKEN:
+        logger.error("Duffel API token not configured")
+        return "Quote creation is currently unavailable. Please configure the Duffel API token."
+
+    try:
+        response = await create_quote(rate_id)
+        logger.info("Quote created successfully")
+        return json.dumps(response)
+
+    except DuffelAPIError as e:
+        logger.error(f"Duffel API error during quote creation: {e}")
+        # Friendly error surface
+        title = "API Error"
+        detail = "Please try again later"
+        if hasattr(e, "error"):
+            if isinstance(e.error, dict):
+                title = e.error.get("title", title)
+                detail = e.error.get("detail", detail)
+            elif hasattr(e.error, "title") and not callable(getattr(e.error, "title", None)):
+                title = getattr(e.error, "title", title)
+                detail = getattr(e.error, "detail", detail)
+            else:
+                title = str(e.error) if e.error else "API Error"
+        return f"Quote creation error: {title} - {detail}"
+
+    except Exception as exc:
+        logger.error("Unexpected error during quote creation", exc_info=True)
+        return f"Unexpected error during quote creation: {exc}"
+
+@tool
+async def create_booking_tool(
+    quote_id: str,
+    guests: list,
+    email: str,
+    stay_special_requests: str = "",
+    phone_number: str = ""
+) -> str:
+    """
+    Book a hotel stay using a Duffel quote.
+    Args:
+        quote_id: The quote ID (quo_...)
+        guests: List of guest dicts (given_name, family_name, born_on)
+        email: Contact email
+        stay_special_requests: (optional) Special requests
+        phone_number: (optional) Contact number
+    Returns:
+        JSON string of the booking response, or an error message.
+    """
+    logger.info(f"Booking creation initiated for quote_id: {quote_id}")
+
+    if not quote_id or not quote_id.startswith("quo_"):
+        return "Error: `quote_id` must start with 'quo_' and be a valid Duffel quote ID."
+
+    if not config.DUFFEL_API_TOKEN:
+        logger.error("Duffel API token not configured")
+        return "Booking creation is currently unavailable. Please configure the Duffel API token."
+
+    try:
+        response = await create_booking(
+            quote_id, guests, email, stay_special_requests, phone_number
+        )
+        logger.info("Booking created successfully")
+        return json.dumps(response)
+
+    except DuffelAPIError as e:
+        logger.error(f"Duffel API error during booking creation: {e}")
+        title = "API Error"
+        detail = "Please try again later"
+        if hasattr(e, "error"):
+            if isinstance(e.error, dict):
+                title = e.error.get("title", title)
+                detail = e.error.get("detail", detail)
+            elif hasattr(e.error, "title") and not callable(getattr(e.error, "title", None)):
+                title = getattr(e.error, "title", "API Error")
+                detail = getattr(e.error, "detail", detail)
+            else:
+                title = str(e.error) if e.error else "API Error"
+        return f"Booking creation error: {title} - {detail}"
+
+    except Exception as exc:
+        logger.error("Unexpected error during booking creation", exc_info=True)
+        return f"Unexpected error during booking creation: {exc}"
 
 # Create the LLM
 def create_llm():
@@ -300,7 +444,7 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
     logger.debug(f"[INIT] UI enabled setting: {state.get('ui_enabled', 'not_set')}")    
 
     llm = create_llm()
-    tools = [get_current_time, calculate_simple_math, search_web, search_hotels_tool]
+    tools = [get_current_time, calculate_simple_math, search_web, search_hotels_tool, fetch_hotel_rates_tool, create_quote_tool, create_booking_tool]
     llm_with_tools = llm.bind_tools(tools)
     
     # System prompt
@@ -504,7 +648,7 @@ def create_graph():
     
     try:
         # Initialize tools
-        tools = [get_current_time, calculate_simple_math, search_web, search_hotels_tool]
+        tools = [get_current_time, calculate_simple_math, search_web, search_hotels_tool, fetch_hotel_rates_tool, create_quote_tool, create_booking_tool]
         logger.debug(f"Initializing ToolNode with {len(tools)} tools: {[tool.name for tool in tools]}")
         tool_node = ToolNode(tools)
 
