@@ -6,6 +6,8 @@ from typing_extensions import TypedDict
 import os
 import logging
 from datetime import date, datetime
+import phonenumbers
+from phonenumbers.phonenumberutil import NumberParseException
 
 # Try to load dotenv, but don't fail if it's not available (e.g., in production)
 try:
@@ -92,6 +94,20 @@ def search_web(query: str) -> str:
     result = f"Mock search results for: {query}. This would normally return real web search results."
     logger.debug("Mock web search completed")
     return result
+
+@tool
+def validate_phone_number_tool(phone: str, region: str = "AU") -> str:
+    """
+    Use this tool to validate and format phone numbers to E.164 format before making a booking or whenever a user provides a phone number.
+    Returns the formatted phone number or an error message if invalid.
+    """
+    try:
+        parsed = phonenumbers.parse(phone, region)
+        if not phonenumbers.is_valid_number(parsed):
+            return "Error: Invalid phone number"
+        return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+    except NumberParseException as e:
+        return f"Error: Invalid phone number: {e}"
 
 @tool
 async def search_hotels_tool(
@@ -444,7 +460,7 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
     logger.debug(f"[INIT] UI enabled setting: {state.get('ui_enabled', 'not_set')}")    
 
     llm = create_llm()
-    tools = [get_current_time, calculate_simple_math, search_web, search_hotels_tool, fetch_hotel_rates_tool, create_quote_tool, create_booking_tool]
+    tools = [get_current_time, calculate_simple_math, search_web, validate_phone_number_tool, search_hotels_tool, fetch_hotel_rates_tool, create_quote_tool, create_booking_tool]
     llm_with_tools = llm.bind_tools(tools)
     
     # System prompt
@@ -648,7 +664,7 @@ def create_graph():
     
     try:
         # Initialize tools
-        tools = [get_current_time, calculate_simple_math, search_web, search_hotels_tool, fetch_hotel_rates_tool, create_quote_tool, create_booking_tool]
+        tools = [get_current_time, calculate_simple_math, search_web, validate_phone_number_tool, search_hotels_tool, fetch_hotel_rates_tool, create_quote_tool, create_booking_tool]
         logger.debug(f"Initializing ToolNode with {len(tools)} tools: {[tool.name for tool in tools]}")
         tool_node = ToolNode(tools)
 
