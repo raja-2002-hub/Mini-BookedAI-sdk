@@ -16,13 +16,10 @@ class DuffelAPIError(Exception):
         self.error = error
         self.status_code = status_code
         
-        # Extract error message
-        if hasattr(error, 'detail'):
+        if isinstance(error, dict):
+            message = error.get('detail') or error.get('message') or error.get('title') or str(error)
+        elif hasattr(error, 'detail'):
             message = error.detail
-        elif hasattr(error, 'title'):
-            message = error.title
-        elif isinstance(error, dict):
-            message = error.get('detail') or error.get('message') or str(error)
         else:
             message = str(error)
         
@@ -67,6 +64,10 @@ class DuffelClient:
     async def post(self, endpoint: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Make POST request to Duffel API."""
         return await self._request("POST", endpoint, json=data)
+    
+    async def patch(self, endpoint: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Make PATCH request to Duffel API."""
+        return await self._request("PATCH", endpoint, json=data)
     
     async def _request(
         self,

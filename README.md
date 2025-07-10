@@ -17,7 +17,13 @@ A hands-on mini project designed for new team members to learn LangGraph agent d
 - Human-in-the-loop capabilities
 - Ready for UI integration
 
-🚧 **Next Phase**: Duffel API integration and Agent Chat UI setup
+✅ **Phase 2 Partial**: Duffel API integration for flights
+- Complete flight search and booking functionality with Duffel API
+- Flight tools with comprehensive validation and error handling
+- Hotel/stays search tools (existing implementation)
+- Comprehensive Pydantic models for flight data
+
+🚧 **Next Phase**: Agent Chat UI setup and enhanced hotel functionality
 
 ## Quick Start (Current Implementation)
 
@@ -25,6 +31,7 @@ A hands-on mini project designed for new team members to learn LangGraph agent d
 - **Python 3.11+** (required for langgraph dev server)
 - **uv** - Install from [https://docs.astral.sh/uv/](https://docs.astral.sh/uv/)
 - **OpenAI API Key** - For the language model
+- **Duffel API Token** - For flight and hotel search functionality
 
 ### Setup Instructions
 
@@ -43,7 +50,7 @@ A hands-on mini project designed for new team members to learn LangGraph agent d
    
    # Configure environment variables
    cp env.example .env
-   # Edit .env and add your OPENAI_API_KEY
+   # Edit .env and add your OPENAI_API_KEY and DUFFEL_API_TOKEN
    ```
 
 3. **Start the LangGraph development server**:
@@ -66,6 +73,14 @@ You can test the agent using the LangGraph Studio UI or API endpoints:
 - `get_current_time()` - Get current date and time
 - `calculate_simple_math(expression)` - Perform arithmetic calculations
 - `search_web(query)` - Mock web search (demo purposes)
+- `validate_phone_number_tool(phone, region)` - Phone number validation
+- `search_hotels_tool()` - Hotel/stays search with Duffel API
+- `fetch_hotel_rates_tool()` - Hotel rate details and quotes
+- `create_quote_tool()` - Hotel booking quotes
+- `create_booking_tool()` - Hotel booking creation
+- **NEW**: `search_flights_tool()` - Flight search with Duffel API
+- **NEW**: `fetch_flight_quote_tool()` - Flight offer quote refresh
+- **NEW**: `create_flight_booking_tool()` - Flight booking creation
 
 **Example Interactions**:
 ```
@@ -74,21 +89,42 @@ Agent: [Uses get_current_time tool] The current time is 2024-06-16 15:30:22
 
 User: "Calculate 25 * 4 + 10"  
 Agent: [Uses calculate_simple_math tool] The result is 110
+
+User: "Search for flights from JFK to LAX on December 15th"
+Agent: [Uses search_flights_tool] Found 5 flight options from JFK to LAX on 2024-12-15:
+       - American Airlines: $299, departing 8:00 AM
+       - Delta: $325, departing 10:30 AM
+       - United: $342, departing 2:15 PM
+
+User: "Find hotels in Los Angeles for December 15-17"  
+Agent: [Uses search_hotels_tool] Found 8 hotels in Los Angeles for your dates:
+       - The Beverly Hills Hotel: $450/night
+       - Hotel Figueroa: $180/night
+       - The Standard Downtown: $220/night
 ```
 
 ### Project Structure (Current)
 
 ```
 mini_bookedai/
-├── graph/                        # ✅ LangGraph implementation (COMPLETE)
+├── graph/                        # ✅ LangGraph implementation with Duffel API
 │   ├── pyproject.toml           # uv project configuration with langgraph-cli[inmem]
 │   ├── .python-version          # Python 3.11 requirement
 │   ├── langgraph.json           # LangGraph server configuration
-│   ├── env.example              # Environment variables template
+│   ├── env.example              # Environment variables template (OPENAI_API_KEY, DUFFEL_API_TOKEN)
 │   ├── src/
-│   │   └── agent/
-│   │       ├── __init__.py
-│   │       └── graph.py         # Complete agent implementation
+│   │   ├── agent/
+│   │   │   ├── __init__.py
+│   │   │   └── graph.py         # Complete agent with flight/hotel tools
+│   │   ├── duffel_client/       # ✅ Duffel API integration
+│   │   │   ├── client.py        # Main Duffel API client
+│   │   │   ├── endpoints/
+│   │   │   │   ├── flights.py   # Flight search and booking endpoints
+│   │   │   │   └── stays.py     # Hotel/stays search endpoints
+│   │   │   └── models/
+│   │   │       ├── flights.py   # Flight Pydantic models
+│   │   │       └── stays.py     # Hotel/stays Pydantic models
+│   │   └── config.py            # Configuration management
 │   └── README.md                # Detailed setup instructions
 ├── ui/                          # 🚧 Agent Chat UI (PLANNED)
 │   └── (to be implemented)
@@ -194,11 +230,13 @@ mini_bookedai/
 - ✅ Human-in-the-loop capabilities
 - ✅ Memory and conversation state
 
-### Phase 2: Core Features (NEXT)
-- Set up Agent Chat UI with basic configuration
-- Implement simple flight search tool using Duffel API
-- Establish UI ↔ Graph server communication
-- Add stays search functionality
+### Phase 2: Core Features ✅ PARTIAL
+- ✅ Implement comprehensive flight search tool using Duffel API
+- ✅ Add flight booking functionality with quote refresh
+- ✅ Implement stays/hotel search functionality
+- ✅ Add hotel booking tools with quote and booking creation
+- 🚧 Set up Agent Chat UI with basic configuration
+- 🚧 Establish UI ↔ Graph server communication
 
 ### Phase 3: Enhanced UX
 - Implement location lookup/suggestions
@@ -303,9 +341,11 @@ class FlightOffer(BaseModel):
 - ✅ Agent can handle tool calls and human-in-the-loop interactions
 - ✅ Proper error handling and user feedback
 - ✅ Clean, maintainable code structure with modern tooling
+- ✅ Agent can search flights using natural language with Duffel API
+- ✅ Agent can search hotels/stays using natural language with Duffel API
+- ✅ Complete flight and hotel booking functionality
+- ✅ Comprehensive Pydantic models for travel data validation
 - 🚧 Agent Chat UI connects to local LangGraph server
-- 🚧 Agent can search flights using natural language
-- 🚧 Agent can search hotels/stays using natural language
 - 🚧 Complete documentation for future team members
 
 ## Key Resources

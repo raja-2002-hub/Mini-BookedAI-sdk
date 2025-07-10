@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2024-12
+
+### Added - Flight Search & Booking Implementation
+- **Complete Flight Search Tool** - `search_flights_tool` with comprehensive parameter validation
+  - Origin/destination airport code support
+  - Departure and return date handling with validation
+  - Passenger count (1-9) and cabin class selection
+  - Flight search results formatting for JSON output
+  - Integration with Duffel Flights API
+- **Flight Booking Functionality**
+  - `fetch_flight_quote_tool` - Refresh offer details and get passenger IDs
+  - `create_flight_booking_tool` - Complete flight booking with passenger and payment data
+  - Comprehensive error handling for Duffel API responses
+- **New Duffel Client Architecture**
+  - `src/duffel_client/endpoints/flights.py` - Flight API endpoint implementations
+  - `src/duffel_client/models/flights.py` - Pydantic models for flight data structures
+  - Flight search request/response models with UI-friendly JSON formatting
+  - FlightSearchRequest, FlightSearchResponse, FlightOffer, and FlightSegment models
+
+### Technical Implementation - Flights
+- **Search Capabilities**:
+  - Natural language date parsing and validation
+  - Round-trip and one-way flight support
+  - Cabin class options: economy, premium_economy, business, first
+  - Results limiting and pagination support
+- **Booking Features**:
+  - Offer quote refresh functionality
+  - Multi-passenger booking support
+  - Contact information validation (email, phone)
+  - Payment integration framework
+- **Data Models**:
+  - Comprehensive flight segment data (times, airlines, aircraft, etc.)
+  - Price and currency handling
+  - Refundable and baggage inclusion flags
+  - UI-optimized JSON response formatting
+
+### Updated Tool Set
+- **Tools Implemented**:
+  - `get_current_time()` - Current date and time retrieval
+  - `calculate_simple_math(expression)` - Safe arithmetic evaluation
+  - `search_web(query)` - Mock web search functionality
+  - `validate_phone_number_tool(phone, region)` - Phone number validation
+  - `search_hotels_tool()` - Hotel/stays search (existing)
+  - `fetch_hotel_rates_tool()` - Hotel rate details (existing)
+  - `create_quote_tool()` - Hotel booking quotes (existing)
+  - `create_booking_tool()` - Hotel booking creation (existing)
+  - **NEW**: `search_flights_tool()` - Flight search with Duffel API
+  - **NEW**: `fetch_flight_quote_tool()` - Flight offer quote refresh
+  - **NEW**: `create_flight_booking_tool()` - Flight booking creation
+
+### Enhanced Project Structure
+```
+graph/src/
+├── agent/
+│   └── graph.py                    # Updated with flight tools
+├── duffel_client/
+│   ├── client.py                   # Main Duffel API client
+│   ├── endpoints/
+│   │   ├── flights.py             # NEW: Flight API endpoints
+│   │   └── stays.py               # Hotel/stays endpoints  
+│   └── models/
+│       ├── flights.py             # NEW: Flight Pydantic models
+│       └── stays.py               # Hotel/stays models
+└── config.py                      # Configuration management
+```
+
+### Configuration Updates
+- **Environment Variables**: Added DUFFEL_API_TOKEN requirement for flight functionality
+- **Tool Registration**: Updated agent tool lists to include all flight tools
+- **Error Handling**: Enhanced Duffel API error handling for both hotels and flights
+
+### Removed/Changed
+- **UI Mapping**: Removed custom UI mapping for flight results (now uses generic JSON renderer)
+- **Tool Lists**: Updated all tool registration points to include new flight tools
+
 ## [Unreleased]
 
 ### Added
@@ -90,11 +165,17 @@ graph/
 - Working development server setup
 - Ready for UI integration and Duffel API implementation
 
+✅ **Phase 2 Partial**: Duffel API integration for flights
+- Complete flight search and booking functionality
+- Flight tools integrated with comprehensive validation
+- Duffel API client architecture implemented
+- Flight models and endpoints established
+
 ### Next Steps
-🚧 **Phase 2**: Duffel API integration and Agent Chat UI setup
+🚧 **Phase 2 Completion**: Agent Chat UI setup and hotels integration
 - Agent Chat UI implementation in `ui/` directory
-- Duffel API integration for flight and hotel search
-- UI ↔ Graph server communication establishment
+- Complete UI ↔ Graph server communication establishment
+- Enhanced hotel/stays functionality (basic implementation exists)
 
 ### Technical Decisions
 - **Python 3.11+**: Required for langgraph dev server functionality
