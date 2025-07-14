@@ -111,6 +111,47 @@ class StaysEndpoint:
         }
         return await self.client.post(endpoint, data=data)
     
+    async def cancel_booking(self, booking_id: str) -> dict:
+        """Cancel a hotel booking by booking_id."""
+        endpoint = f"/stays/bookings/{booking_id}/actions/cancel"
+        try:
+            response = await self.client.post(endpoint, data={})
+            return response
+        except Exception as e:
+            logger.error(f"Error cancelling hotel booking {booking_id}: {e}")
+            raise DuffelAPIError({
+                'type': 'client_error',
+                'title': 'Hotel booking cancellation failed',
+                'detail': str(e)
+            })
+    
+    async def update_booking(self, booking_id: str, data: dict) -> dict:
+        """Update a hotel booking by booking_id using PATCH."""
+        endpoint = f"/stays/bookings/{booking_id}"
+        try:
+            # First, get the existing booking to preserve required fields like 'users'
+            existing_booking = await self.client.get(f"/stays/bookings/{booking_id}")
+            existing_data = existing_booking.get("data", {})
+            
+            # Merge the update data with existing data, preserving required fields
+            updated_data = {**existing_data, **data}
+            
+            # Ensure users field is preserved
+            if "users" not in updated_data and "users" in existing_data:
+                updated_data["users"] = existing_data["users"]
+            
+            # Wrap data in 'data' key as required by Duffel API
+            request_body = {"data": updated_data}
+            response = await self.client.patch(endpoint, json=request_body)
+            return response
+        except Exception as e:
+            logger.error(f"Error updating hotel booking {booking_id}: {e}")
+            raise DuffelAPIError({
+                'type': 'client_error',
+                'title': 'Hotel booking update failed',
+                'detail': str(e)
+            })
+    
     def _parse_hotels_response(self, response_data: Dict[str, Any]) -> List[Hotel]:
         """Parse Duffel API response into Hotel models.
         
@@ -419,3 +460,17 @@ async def create_booking(
     return await stays_endpoint.create_booking(
         quote_id, guests, email, stay_special_requests, phone_number
     )
+
+async def cancel_hotel_booking(booking_id: str) -> dict:
+    """Convenience function to cancel a hotel booking by booking_id."""
+    from ..client import get_client
+    client = get_client()
+    stays_endpoint = StaysEndpoint(client)
+    return await stays_endpoint.cancel_booking(booking_id)
+
+async def update_hotel_booking(booking_id: str, data: dict) -> dict:
+    """Convenience function to update a hotel booking by booking_id."""
+    from ..client import get_client
+    client = get_client()
+    stays_endpoint = StaysEndpoint(client)
+    return await stays_endpoint.update_booking(booking_id, data)

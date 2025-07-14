@@ -281,32 +281,7 @@ class FlightsEndpoint:
             data["data"]["type"] = type
         return await self.client.post("/air/order_change_requests", data=data)
         
-    async def get_order_change_request(self, request_id: str) -> Dict[str, Any]:
-        """Get details for a change request."""
-        return await self.client.get(f"/air/order_change_requests/{request_id}")
-
-    async def list_order_change_offers(self, request_id: Optional[str] = None) -> Dict[str, Any]:
-        """List change offers (optionally filter by request_id)."""
-        params = {"order_change_request_id": request_id} if request_id else None
-        return await self.client.get("/air/order_change_offers", params=params)
-
-    async def get_order_change_offer(self, offer_id: str) -> Dict[str, Any]:
-        """Get details for a change offer."""
-        return await self.client.get(f"/air/order_change_offers/{offer_id}")
-
-    async def confirm_order_change(self, change_id: str) -> Dict[str, Any]:
-        """Confirm a change."""
-        return await self.client.post(f"/air/order_changes/{change_id}/actions/confirm", data={})
-
-    async def get_order_change(self, change_id: str) -> Dict[str, Any]:
-        """Get details for a change."""
-        return await self.client.get(f"/air/order_changes/{change_id}")
-
-    async def create_order_change(self, offer_id: str) -> Dict[str, Any]:
-        """Create a change from an offer."""
-        data = {"data": {"selected_order_change_offer": offer_id}}
-        return await self.client.post("/air/order_changes", data=data)
-
+ 
 # --- Standalone functions for agent use ---
 async def search_flights(
     slices: list,
@@ -494,57 +469,6 @@ async def create_order_change_request_api(*, order_id: str, slices: Optional[lis
     client = get_client()
     endpoint = FlightsEndpoint(client)
     return await endpoint.create_order_change_request(order_id=order_id, slices=slices, type=type)
-
-async def get_order_change_request_api(*, request_id: str) -> Dict[str, Any]:
-    client = get_client()
-    endpoint = FlightsEndpoint(client)
-    return await endpoint.get_order_change_request(request_id=request_id)
-
-async def list_order_change_offers_api(*, request_id: Optional[str] = None) -> Dict[str, Any]:
-    client = get_client()
-    endpoint = FlightsEndpoint(client)
-    offers = await endpoint.list_order_change_offers(request_id=request_id)
-    detailed_offers = []
-    for offer in offers["data"]:
-        offer_id = offer["id"]
-        details = await get_order_change_offer_api(offer_id=offer_id)
-        # Extract airline, flight number, etc. from details["data"]
-        detailed_offers.append({
-            "airline": details["data"]["slices"][0]["segments"][0]["operating_carrier"]["name"],
-            "flight_number": details["data"]["slices"][0]["segments"][0]["marketing_carrier_flight_number"],
-            "departure": details["data"]["slices"][0]["segments"][0]["departing_at"],
-            # Add more fields as needed
-        })
-    return detailed_offers
-
-async def get_order_change_offer_api(*, offer_id: str) -> dict:
-    client = get_client()
-    endpoint = FlightsEndpoint(client)
-    response = await endpoint.get_order_change_offer(offer_id=offer_id)
-    if isinstance(response, dict):
-        return response
-    if isinstance(response, str):
-        import json
-        try:
-            return json.loads(response)
-        except Exception:
-            return {"error": "API returned non-JSON response", "raw": response}
-    return {"error": "Unknown response type", "raw": str(response)}
-
-async def confirm_order_change_api(*, change_id: str) -> Dict[str, Any]:
-    client = get_client()
-    endpoint = FlightsEndpoint(client)
-    return await endpoint.confirm_order_change(change_id=change_id)
-
-async def get_order_change_api(*, change_id: str) -> Dict[str, Any]:
-    client = get_client()
-    endpoint = FlightsEndpoint(client)
-    return await endpoint.get_order_change(change_id=change_id)
-
-async def create_order_change_api(*, offer_id: str) -> Dict[str, Any]:
-    client = get_client()
-    endpoint = FlightsEndpoint(client)
-    return await endpoint.create_order_change(offer_id=offer_id)
 
 
 

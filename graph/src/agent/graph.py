@@ -8,6 +8,8 @@ import logging
 from datetime import date, datetime
 import phonenumbers
 from phonenumbers.phonenumberutil import NumberParseException
+import requests
+
 import dateparser
 import re
 
@@ -33,25 +35,17 @@ from langgraph.prebuilt import ToolNode
 from langgraph.errors import GraphInterrupt
 
 # Import our Duffel client
-from src.duffel_client.endpoints.stays import search_hotels, fetch_hotel_rates, create_quote, create_booking
+from src.duffel_client.endpoints.stays import search_hotels, fetch_hotel_rates, create_quote, create_booking, cancel_hotel_booking, update_hotel_booking
 from src.duffel_client.endpoints.flights import search_flights, format_flights_markdown, get_seat_maps,fetch_flight_offer, create_flight_booking, list_airline_initiated_changes, update_airline_initiated_change, accept_airline_initiated_change
 from src.duffel_client.client import DuffelAPIError
 from src.config import config
 
 # --- Flight Order Change Tools ---
 from src.duffel_client.endpoints.flights import (
-    create_order_change_request_api,
-    get_order_change_request_api,
-    list_order_change_offers_api,
-    get_order_change_offer_api,
-    confirm_order_change_api,
-    get_order_change_api,
-    create_order_change_api,
-    list_order_cancellations,
-    get_order_cancellation,
-    confirm_order_cancellation,
-    create_order_cancellation,
+    create_order_change_request_api,  # Only this is needed for changing flights
 )
+
+from src.duffel_client.endpoints.flights import create_order_cancellation, confirm_order_cancellation
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -81,25 +75,55 @@ class AgentState(TypedDict):
 def parse_and_normalize_date(input_date: str) -> str:
     """
     Parse a date string using dateparser and ensure it is in the future.
-    If the date is in the past, roll it forward to the next year.
+    If the date is in the past (even after rolling to this year), keep rolling forward to the next year until it is in the future.
     Returns a string in YYYY-MM-DD format.
     """
     today = date.today()
     try:
-        dt = dateparser.parse(input_date, settings={'PREFER_DATES_FROM': 'future'})
+        logger.info(f"[DEBUG] parse_and_normalize_date called with input: {input_date}")
+        
+        # First try to parse with dateparser
+        dt = None
+        try:
+            dt = dateparser.parse(input_date, settings={'PREFER_DATES_FROM': 'future'})
+        except Exception as parse_error:
+            logger.info(f"[DEBUG] dateparser.parse failed: {parse_error}")
+        
+        # If dateparser failed, try to parse as YYYY-MM-DD format
         if not dt:
-            return input_date  # fallback if parsing fails
-        dt = dt.date()
-        if dt < today:
             try:
-                dt = dt.replace(year=today.year)
-                if dt < today:
-                    dt = dt.replace(year=today.year + 1)
+                dt = datetime.strptime(input_date, "%Y-%m-%d").date()
+                logger.info(f"[DEBUG] Parsed as YYYY-MM-DD: {dt}")
             except ValueError:
+                logger.info(f"[DEBUG] Could not parse as YYYY-MM-DD either, returning as is: {input_date}")
+                return input_date  # fallback if all parsing fails
+        
+        # Convert to date if it's a datetime
+        if hasattr(dt, 'date'):
+            dt = dt.date()
+        
+        # Always roll forward if in the past
+        original_dt = dt
+        while dt < today:
+            try:
+                dt = dt.replace(year=dt.year + 1)
+                logger.info(f"[DEBUG] Rolled forward to: {dt}")
+            except ValueError:
+                # Handles Feb 29 on non-leap years, etc.
+                logger.info(f"[DEBUG] ValueError when rolling forward, using today")
                 dt = today
-        return dt.strftime("%Y-%m-%d")
-    except Exception:
-        return input_date
+                break
+        
+        result = dt.strftime("%Y-%m-%d")
+        logger.info(f"[DEBUG] parse_and_normalize_date output: {result} (from {original_dt})")
+        return result
+        
+    except Exception as e:
+        logger.info(f"[DEBUG] parse_and_normalize_date exception: {e}, input: {input_date}")
+        # Last resort: return today's date
+        today_str = today.strftime("%Y-%m-%d")
+        logger.info(f"[DEBUG] Returning today's date as fallback: {today_str}")
+        return today_str
 
 
 # Define tools
@@ -139,18 +163,48 @@ def search_web(query: str) -> str:
     return result
 
 @tool
-def validate_phone_number_tool(phone: str, region: str = "AU") -> str:
+def validate_phone_number_tool(phone: str) -> str:
     """
-    Use this tool to validate and format phone numbers to E.164 format before making a booking or whenever a user provides a phone number.
-    Returns the formatted phone number or an error message if invalid.
+    Validates a phone number using automatic IP-based region detection and asks for confirmation.
+    If the phone starts with '+', no region is needed.
+    If not, automatically detects user's country from their IP address.
+    
+    This tool should be used when collecting phone numbers for bookings to ensure accuracy.
     """
     try:
-        parsed = phonenumbers.parse(phone, region)
+        if phone.startswith("+"):
+            parsed = phonenumbers.parse(phone, None)
+            country_name = "Unknown"
+        else:
+            # Automatically detect user's country from IP
+            try:
+                # Get user's IP address automatically
+                ip_response = requests.get("https://api.ipify.org?format=json")
+                user_ip = ip_response.json().get("ip")
+                
+                # Get country from IP
+                geo_response = requests.get(f"https://ipapi.co/{user_ip}/json/")
+                region = geo_response.json().get("country")
+                country_name = geo_response.json().get("country_name", "Unknown")
+                
+                if not region:
+                    return "Error: Could not detect your country automatically. Please provide phone number with country code (e.g., +1 for US, +44 for UK)"
+                
+                parsed = phonenumbers.parse(phone, region)
+            except Exception as e:
+                return f"Error: Could not detect your country automatically. Please provide phone number with country code (e.g., +1 for US, +44 for UK). Error: {str(e)}"
+
         if not phonenumbers.is_valid_number(parsed):
             return "Error: Invalid phone number"
-        return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+
+        formatted_number = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+        
+        # Return confirmation message with country detection
+        return f"CONFIRMATION NEEDED: I detected you're in {country_name}. Is your phone number {formatted_number}? Please respond with 'yes' or 'no'."
+        
     except NumberParseException as e:
         return f"Error: Invalid phone number: {e}"
+
 
 @tool
 async def search_flights_tool(
@@ -198,9 +252,12 @@ async def search_flights_tool(
         # Validate slices
         if not isinstance(slices, list) or not slices:
             return "Error: 'slices' must be a non-empty list of segment dicts."
+        # Normalize all departure_date fields using parse_and_normalize_date
         for seg in slices:
             if not all(k in seg for k in ("origin", "destination", "departure_date")):
                 return "Error: Each slice must have 'origin', 'destination', and 'departure_date'."
+            # Normalize the departure_date
+            seg["departure_date"] = parse_and_normalize_date(seg["departure_date"])
             # Date validation
             try:
                 dep_date = datetime.strptime(seg["departure_date"], "%Y-%m-%d").date()
@@ -702,50 +759,98 @@ async def accept_airline_initiated_change_tool(change_id: str) -> str:
 @tool
 def cancel_flight_booking_tool(order_id: str) -> str:
     """
-    Cancel a flight booking by order ID. This will:
-    1. Find or create an order cancellation for the given order_id.
-    2. Confirm the cancellation.
-    Returns a JSON string with the cancellation result or a clear error message.
+    Cancel a flight booking by order ID using the full Duffel flow:
+    1. Create a pending order cancellation
+    2. Confirm the cancellation
+    Returns a JSON string with the final cancellation result or a clear error message.
     """
     import asyncio
     import json
     async def do_cancel():
         try:
-            # 1. List all cancellations
-            cancels = await list_order_cancellations()
-            found = None
-            for c in cancels.get("data", []):
-                if c.get("order_id") == order_id:
-                    found = c
-                    break
-            if not found:
-                # Create a cancellation request
-                created = await create_order_cancellation(order_id)
-                found = created.get("data")
-                if not found:
-                    return json.dumps({"error": f"Could not create cancellation for order_id {order_id}"})
-            cancel_id = found["id"]
-            # 2. Confirm the cancellation
-            confirm = await confirm_order_cancellation(cancel_id)
-            return json.dumps(confirm)
+            # Step 1: Create the cancellation
+            create_resp = await create_order_cancellation(order_id)
+            cancellation_data = create_resp.get("data")
+            if not cancellation_data or not cancellation_data.get("id"):
+                return json.dumps({"error": "Could not create cancellation or missing cancellation ID.", "raw": create_resp})
+            cancellation_id = cancellation_data["id"]
+            # Step 2: Confirm the cancellation
+            from src.duffel_client.endpoints.flights import confirm_order_cancellation
+            confirm_resp = await confirm_order_cancellation(cancellation_id)
+            return json.dumps(confirm_resp)
         except Exception as e:
             return json.dumps({"error": f"Cancellation failed: {str(e)}"})
     return asyncio.run(do_cancel())
 
+@tool
+async def cancel_hotel_booking_tool(booking_id: str) -> str:
+    """Cancel a hotel booking by booking_id. Returns a JSON string with the cancellation result or error."""
+    import json
+    try:
+        response = await cancel_hotel_booking(booking_id)
+        return json.dumps(response)
+    except DuffelAPIError as e:
+        return json.dumps({"error": str(e)})
+    except Exception as e:
+        return json.dumps({"error": f"Unexpected error: {str(e)}"})
 
 @tool
-async def create_order_change_request_tool(
+async def update_hotel_booking_tool(
+    booking_id: str, 
+    email: str = None,
+    phone_number: str = None,
+    stay_special_requests: str = None
+) -> str:
+    """Update a hotel booking by booking_id. Provide any fields you want to update. Returns a JSON string with the update result or error."""
+    import json
+    try:
+        # Build the data dictionary from provided fields
+        data = {}
+        if email is not None:
+            data["email"] = email
+        if phone_number is not None:
+            data["phone_number"] = phone_number
+        if stay_special_requests is not None:
+            data["stay_special_requests"] = stay_special_requests
+        
+        if not data:
+            return json.dumps({"error": "No fields provided to update"})
+        
+        response = await update_hotel_booking(booking_id, data)
+        return json.dumps(response)
+    except DuffelAPIError as e:
+        return json.dumps({"error": str(e)})
+    except Exception as e:
+        return json.dumps({"error": f"Unexpected error: {str(e)}"})
+
+
+@tool
+async def change_flight_booking_tool(
     order_id: str,
     slices: Optional[List[Dict[str, str]]] = None,
-    type: str = "update"
+    type: str = "update",
+    cabin_class: str = None
 ) -> str:
     """
-    Create a Duffel order change request. Requires `type`, and slices which includes origin, destination, and departure_date if `type` is 'update'.
+    Use this tool to request a change to an existing flight booking (e.g., change date, route, etc.).
+    - If the user does not explicitly mention their current flight or booking, you should cancel the current booking (if any) and search for a new flight instead of attempting a change.
+    - Only use this tool if the user clearly wants to change their existing booking (e.g., "change my current flight to 10 Dec").
+    - If the user asks for a new route, origin, or destination, or does not specify a current booking, cancel and search for a new flight.
+
+    Requires `type`, and slices which includes origin, destination, and departure_date if `type` is 'update'.
+    Requires `cabin_class` (economy, premium_economy, business, first).
     """
+    CABIN_CLASSES = ["economy", "premium_economy", "business", "first"]
+    if not cabin_class or cabin_class.lower() not in CABIN_CLASSES:
+        return "Which cabin class would you like for your new flight? (Economy, Premium Economy, Business, First)"
     try:
         if type == "update" and not slices:
             return "Error: Slices must be provided when type is 'update'."
         result = await create_order_change_request_api(order_id=order_id, slices=slices, type=type)
+        # If offers are present, filter by cabin_class
+        if isinstance(result, dict) and "offers" in result:
+            filtered = [o for o in result["offers"] if o.get("cabin", "").lower() == cabin_class.lower()]
+            result["offers"] = filtered
         return json.dumps(result)
     except DuffelAPIError as e:
         title = "Duffel API Error"
@@ -762,138 +867,11 @@ async def create_order_change_request_tool(
                 detail = str(getattr(err, "detail", ""))
             except Exception:
                 detail = str(err)
-        return f"Error creating order change request: {title} - {detail}"
+        return f"Error requesting flight change: {title} - {detail}"
     except Exception as e:
-        return f"Unexpected error creating order change request: {str(e)}"
+        return f"Unexpected error requesting flight change: {str(e)}"
 
-@tool
-async def get_order_change_request_tool(request_id: str) -> str:
-    """Get details for a flight order change request. Args: request_id (str). Returns: JSON string of the order change request details."""
-    try:
-        result = await get_order_change_request_api(request_id=request_id)
-        return json.dumps(result)
-    except Exception as e:
-        return f"Error getting order change request: {str(e)}"
 
-@tool
-async def list_order_change_offers_tool(request_id: str = None) -> str:
-    """
-    List change offers for a flight order change request, with full flight details for each offer.
-    Args: request_id (str, optional).
-    Returns: JSON string of the change offers, each with detailed flight info.
-    """
-    import logging
-    try:
-        offers_result = await list_order_change_offers_api(request_id=request_id)
-        offers = offers_result.get("data", [])
-        detailed_offers = []
-        for offer in offers:
-            offer_id = offer.get("id")
-            if not offer_id:
-                continue
-            # Fetch full details for each offer
-            offer_details = await get_order_change_offer_api(offer_id=offer_id)
-            if isinstance(offer_details, str):
-                print(f"DEBUG: offer_details for offer_id {offer_id}: {offer_details}")
-                try:
-                    offer_details = json.loads(offer_details)
-                except Exception as parse_exc:
-                    logging.warning(f"Could not parse offer_details for offer_id {offer_id}: {offer_details}")
-                    continue  # Skip this offer if not valid JSON
-            if not isinstance(offer_details, dict):
-                logging.warning(f"offer_details for offer_id {offer_id} is not a dict: {offer_details}")
-                continue
-            data = offer_details.get("data", {})
-            # Extract relevant flight details from the offer
-            slices = data.get("slices", [])
-            segments = []
-            for s in slices:
-                for seg in s.get("segments", []):
-                    passenger = seg.get("passengers", [{}])[0] if seg.get("passengers") else {}
-                    segments.append({
-                        "origin": seg.get("origin", {}).get("iata_code", "Unknown"),
-                        "origin_name": seg.get("origin", {}).get("name", "Unknown"),
-                        "destination": seg.get("destination", {}).get("iata_code", "Unknown"),
-                        "destination_name": seg.get("destination", {}).get("name", "Unknown"),
-                        "departure_time": seg.get("departing_at", "N/A"),
-                        "arrival_time": seg.get("arriving_at", "N/A"),
-                        "duration": seg.get("duration", "N/A"),
-                        "airline": seg.get("operating_carrier", {}).get("name", "Unknown"),
-                        "flight_number": seg.get("marketing_carrier_flight_number", "Unknown"),
-                        "aircraft": seg.get("aircraft", {}).get("name", "Unknown"),
-                        "cabin_class": passenger.get("cabin_class_marketing_name", "Unknown"),
-                        "baggage": passenger.get("baggages", []),
-                    })
-            # Use first segment for summary fields
-            first_segment = segments[0] if segments else {}
-            detailed_offers.append({
-                "offer_id": offer_id,
-                "total_amount": data.get("total_amount", "N/A"),
-                "currency": data.get("total_currency", "N/A"),
-                "cabin": first_segment.get("cabin_class", "Unknown"),
-                "flight_number": first_segment.get("flight_number", "Unknown"),
-                "airline": first_segment.get("airline", "Unknown"),
-                "origin": first_segment.get("origin", "Unknown"),
-                "origin_name": first_segment.get("origin_name", "Unknown"),
-                "destination": first_segment.get("destination", "Unknown"),
-                "destination_name": first_segment.get("destination_name", "Unknown"),
-                "departure_time": first_segment.get("departure_time", "N/A"),
-                "arrival_time": first_segment.get("arrival_time", "N/A"),
-                "duration": first_segment.get("duration", "N/A"),
-                "aircraft": first_segment.get("aircraft", "Unknown"),
-                "baggage": first_segment.get("baggage", []),
-                "segments": segments,
-            })
-        return json.dumps({"offers": detailed_offers})
-    except Exception as e:
-        return f"Error listing order change offers: {str(e)}"
-
-@tool
-async def get_order_change_offer_tool(offer_id: str) -> str:
-    """Get details for a flight order change offer. Args: offer_id (str). Returns: JSON string of the order change offer details."""
-    try:
-        result = await get_order_change_offer_api(offer_id=offer_id)
-        return json.dumps(result)
-    except Exception as e:
-        return f"Error getting order change offer: {str(e)}"
-
-@tool
-async def confirm_order_change_tool(change_id: str) -> str:
-    """
-    Confirm a flight order change.
-    Args:
-        change_id (str): The ID returned from create_order_change_api (not an offer_id or request_id!).
-            - To confirm an order change, you must:
-                1. Create an order change from a selected offer (using create_order_change_api or create_order_change_tool).
-                2. Extract the 'id' from the response (this is the change_id).
-                3. Pass this change_id to this tool to confirm the order change.
-            - Do NOT use an offer_id (oco_...) or request_id (ocr_...) here; only use the change_id (oce_... or similar).
-    Returns:
-        JSON string of the confirmation response.
-    """
-    try:
-        result = await confirm_order_change_api(change_id=change_id)
-        return json.dumps(result)
-    except Exception as e:
-        return f"Error confirming order change: {str(e)}"
-
-@tool
-async def get_order_change_tool(change_id: str) -> str:
-    """Get details for a confirmed flight order change. Args: change_id (str). Returns: JSON string of the order change details."""
-    try:
-        result = await get_order_change_api(change_id=change_id)
-        return json.dumps(result)
-    except Exception as e:
-        return f"Error getting order change: {str(e)}"
-
-@tool
-async def create_order_change_tool(offer_id: str) -> str:
-    """Create a confirmed flight order change from an offer. Args: offer_id (str). Returns: JSON string of the created order change."""
-    try:
-        result = await create_order_change_api(offer_id=offer_id)
-        return json.dumps(result)
-    except Exception as e:
-        return f"Error creating order change: {str(e)}"
 
 # Create the LLM
 def create_llm():
@@ -982,10 +960,27 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
     logger.debug(f"[INIT] State keys: {list(state.keys())}")
     logger.debug(f"[INIT] UI enabled setting: {state.get('ui_enabled', 'not_set')}")    
 
-
     llm = create_llm()
     tools = [
-        get_current_time, calculate_simple_math, search_web, validate_phone_number_tool, search_flights_tool, search_hotels_tool, get_seat_maps_tool, fetch_hotel_rates_tool, create_quote_tool, create_booking_tool, fetch_flight_quote_tool, create_flight_booking_tool, list_airline_initiated_changes_tool, update_airline_initiated_change_tool, accept_airline_initiated_change_tool, create_order_change_request_tool, get_order_change_request_tool, get_order_change_offer_tool, confirm_order_change_tool, get_order_change_tool, create_order_change_tool, cancel_flight_booking_tool
+        get_current_time,
+        calculate_simple_math,
+        search_web,
+        validate_phone_number_tool,
+        search_flights_tool,
+        search_hotels_tool,
+        fetch_hotel_rates_tool,
+        create_quote_tool,
+        create_booking_tool,
+        fetch_flight_quote_tool,
+        create_flight_booking_tool,
+        get_seat_maps_tool,
+        list_airline_initiated_changes_tool,
+        update_airline_initiated_change_tool,
+        accept_airline_initiated_change_tool,
+        change_flight_booking_tool,
+        cancel_flight_booking_tool,
+        cancel_hotel_booking_tool,
+        update_hotel_booking_tool
     ]
     llm_with_tools = llm.bind_tools(tools)
     
@@ -1191,7 +1186,25 @@ def create_graph():
     try:
         # Initialize tools
         tools = [
-            get_current_time, calculate_simple_math, search_web, validate_phone_number_tool, search_flights_tool, search_hotels_tool, get_seat_maps_tool, fetch_hotel_rates_tool, create_quote_tool, create_booking_tool, fetch_flight_quote_tool, create_flight_booking_tool, list_airline_initiated_changes_tool, update_airline_initiated_change_tool, accept_airline_initiated_change_tool, create_order_change_request_tool, get_order_change_request_tool, get_order_change_offer_tool, confirm_order_change_tool, get_order_change_tool, create_order_change_tool, cancel_flight_booking_tool
+            get_current_time,
+            calculate_simple_math,
+            search_web,
+            validate_phone_number_tool,
+            search_flights_tool,
+            search_hotels_tool,
+            fetch_hotel_rates_tool,
+            create_quote_tool,
+            create_booking_tool,
+            fetch_flight_quote_tool,
+            create_flight_booking_tool,
+            get_seat_maps_tool,
+            list_airline_initiated_changes_tool,
+            update_airline_initiated_change_tool,
+            accept_airline_initiated_change_tool,
+            change_flight_booking_tool,
+            cancel_flight_booking_tool,
+            cancel_hotel_booking_tool,
+            update_hotel_booking_tool
         ]
         logger.debug(f"Initializing ToolNode with {len(tools)} tools: {[tool.name for tool in tools]}")
         tool_node = ToolNode(tools)

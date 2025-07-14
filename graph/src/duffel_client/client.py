@@ -65,9 +65,9 @@ class DuffelClient:
         """Make POST request to Duffel API."""
         return await self._request("POST", endpoint, json=data)
     
-    async def patch(self, endpoint: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def patch(self, endpoint: str, data: Optional[Dict[str, Any]] = None, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Make PATCH request to Duffel API."""
-        return await self._request("PATCH", endpoint, json=data)
+        return await self._request("PATCH", endpoint, json=json or data)
     
     async def _request(
         self,
