@@ -8,7 +8,7 @@ import logging
 from datetime import date, datetime
 import phonenumbers
 from phonenumbers.phonenumberutil import NumberParseException
-import requests
+import httpx
 
 import dateparser
 import re
@@ -54,7 +54,6 @@ logging.basicConfig(level=logging.INFO)
 TOOL_UI_MAPPING = {
     "search_hotels_tool": "hotelResults",
     "search_flights_tool": "flightResults",
-
 }
 
 # Log UI-related imports and configurations
@@ -163,7 +162,7 @@ def search_web(query: str) -> str:
     return result
 
 @tool
-def validate_phone_number_tool(phone: str) -> str:
+async def validate_phone_number_tool(phone: str) -> str:
     """
     Validates a phone number using automatic IP-based region detection and asks for confirmation.
     If the phone starts with '+', no region is needed.
@@ -178,19 +177,20 @@ def validate_phone_number_tool(phone: str) -> str:
         else:
             # Automatically detect user's country from IP
             try:
-                # Get user's IP address automatically
-                ip_response = requests.get("https://api.ipify.org?format=json")
-                user_ip = ip_response.json().get("ip")
-                
-                # Get country from IP
-                geo_response = requests.get(f"https://ipapi.co/{user_ip}/json/")
-                region = geo_response.json().get("country")
-                country_name = geo_response.json().get("country_name", "Unknown")
-                
-                if not region:
-                    return "Error: Could not detect your country automatically. Please provide phone number with country code (e.g., +1 for US, +44 for UK)"
-                
-                parsed = phonenumbers.parse(phone, region)
+                async with httpx.AsyncClient() as client:
+                    # Get user's IP address automatically
+                    ip_response = await client.get("https://api.ipify.org?format=json")
+                    user_ip = ip_response.json().get("ip")
+                    
+                    # Get country from IP
+                    geo_response = await client.get(f"https://ipapi.co/{user_ip}/json/")
+                    region = geo_response.json().get("country")
+                    country_name = geo_response.json().get("country_name", "Unknown")
+                    
+                    if not region:
+                        return "Error: Could not detect your country automatically. Please provide phone number with country code (e.g., +1 for US, +44 for UK)"
+                    
+                    parsed = phonenumbers.parse(phone, region)
             except Exception as e:
                 return f"Error: Could not detect your country automatically. Please provide phone number with country code (e.g., +1 for US, +44 for UK). Error: {str(e)}"
 
@@ -214,38 +214,13 @@ async def search_flights_tool(
     max_results: int = 5
 ) -> str:
     """
-    Search for flights (supports one-way, round-trip, and multi-city itineraries).
+    Search for flights across all airlines! 
 
-    Use this tool for any flight search, including multi-city or multi-leg trips. 
-    If the user asks for a journey with multiple legs (e.g., "from A to B and then B to C"), 
-    combine all legs into a single call by providing a 'slices' list with each segment.
+    I can find flights for one-way, round-trip, or multi-city journeys. 
+    Supports all cabin classes (Economy, Premium Economy, Business, First) and up to 9 passengers.
 
-    Args:
-        slices: List of flight segments, each as a dict with 'origin', 'destination', and 'departure_date'.
-            Example for multi-city:
-                [
-                    {"origin": "MEL", "destination": "SYD", "departure_date": "2025-11-08"},
-                    {"origin": "SYD", "destination": "BER", "departure_date": "2025-11-08"}
-                ]
-        passengers: Number of passengers (default: 1)
-        cabin_class: Cabin class (economy, premium_economy, business, first)
-        max_results: Max number of results (default: 5)
-
-    Returns:
-        A JSON string with flight search results.
-
-    Example user queries:
-        - "I want to book a flight from Melbourne to Sydney and then from Sydney to Berlin on November 8, 2025."
-        - "Book a multi-city trip: NYC to London on June 1, then London to Paris on June 5."
-    Example tool call:
-        search_flights_tool(
-            slices=[
-                {"origin": "NYC", "destination": "LON", "departure_date": "2024-06-01"},
-                {"origin": "LON", "destination": "PAR", "departure_date": "2024-06-05"}
-            ],
-            passengers=1,
-            cabin_class="economy"
-        )
+    Dates can be natural language like "next Friday" or "December 15th".
+    Returns up to 5 options by default.
     """
     logger.info(f"Flight search initiated - Slices: {slices}, Passengers: {passengers}, Cabin: {cabin_class}, Max results: {max_results}")
     try:
