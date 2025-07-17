@@ -271,11 +271,12 @@ async def search_hotels_tool(
     check_out_date: str,
     adults: int = None,
     children: int = None,
-    max_results: int = 5
+    max_results: int = 5,
+    hotel_name: str = None
 ) -> str:
 
     """
-    Searches for hotels based on location, dates, and guest details.
+    Searches for hotels based on location, dates, guest details and optionally a specific hotel name.
 
     Location and dates are required, while the number of adults and children is optional. If not provided, the search will assume 1 adult and 0 children—no need to ask the user or mention these defaults unless you're quoting or booking.
 
@@ -283,6 +284,9 @@ async def search_hotels_tool(
 
     If any required information is missing (except adults or children), ask the user for clarification.
 
+    If `hotel_name` is provided, the tool will attempt to geocode the hotel name (optionally with city/location) to obtain latitude and longitude, and perform a targeted search with a small radius.
+    If `hotel_name` is not provided, the tool will search by the given location (city/country).
+    
     By default, up to 5 results will be returned, unless a different max is specified.
     """
 
@@ -331,6 +335,8 @@ async def search_hotels_tool(
             logger.error("Duffel API token not configured")
             return "Hotel search is currently unavailable. Please configure the Duffel API token."
         
+        if hotel_name:
+            location = f"{hotel_name}, {location}"
         # Perform hotel search
         logger.info(f"Calling Duffel API for hotel search in {location}")
         response = await search_hotels(
