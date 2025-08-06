@@ -23,6 +23,10 @@ class Config:
     DUFFEL_BASE_URL: str = os.getenv("DUFFEL_BASE_URL", "https://api.duffel.com")
     DUFFEL_API_VERSION: str = os.getenv("DUFFEL_API_VERSION", "v2")
     
+    # mem0 Configuration
+    MEM0_API_KEY: str = os.getenv("MEM0_API_KEY", "")
+    MEM0_NAMESPACE: str = os.getenv("MEM0_NAMESPACE", "bookedai")
+    
     # Request Configuration
     REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", "30"))
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))

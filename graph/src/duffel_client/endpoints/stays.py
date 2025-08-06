@@ -3,6 +3,7 @@ Duffel Stays API endpoint for hotel search functionality.
 """
 import logging
 import asyncio
+import json
 from typing import List, Dict, Any, Optional
 from datetime import date
 
@@ -152,6 +153,37 @@ class StaysEndpoint:
                 'detail': str(e)
             })
     
+    async def fetch_loyalty_programmes(self) -> list:
+        """Fetch all loyalty programmes supported by Duffel Stays."""
+        try:
+            response = await self.client.get("/stays/loyalty_programmes")
+            # Parse into LoyaltyProgramme models
+            from ..models.stays import LoyaltyProgramme
+            data = response.get("data", [])
+            return [LoyaltyProgramme(**item) for item in data]
+        except Exception as e:
+            logger.error(f"Error fetching loyalty programmes: {e}")
+            raise DuffelAPIError({
+                'type': 'client_error',
+                'title': 'Loyalty programme fetch failed',
+                'detail': str(e)
+            })
+    
+    async def fetch_accommodation_reviews(self, accommodation_id: str, after: str = None, before: str = None, limit: int = 50) -> list:
+        """
+        Fetch guest reviews for an accommodation.
+        """
+        endpoint = f"/stays/accommodation/{accommodation_id}/reviews"
+        params = {"limit": limit}
+        if after:
+            params["after"] = after
+        if before:
+            params["before"] = before
+        response = await self.client.get(endpoint, params=params)
+        from ..models.stays import AccommodationReview
+        reviews = response.get("data", {}).get("reviews", [])
+        return [AccommodationReview(**r) for r in reviews]
+    
     def _parse_hotels_response(self, response_data: Dict[str, Any]) -> List[Hotel]:
         """Parse Duffel API response into Hotel models.
         
@@ -188,6 +220,7 @@ class StaysEndpoint:
         """
         # Duffel search results have accommodation data nested
         accommodation = result_data.get("accommodation", {})
+        print("DEBUG ACCOMMODATION:", accommodation)  # Debug print to inspect loyalty programme fields
         
         # Parse basic hotel information
         name = accommodation.get("name", "")
@@ -266,6 +299,37 @@ class StaysEndpoint:
             room = self._parse_room(room_data)
             rooms.append(room)
         
+        # Parse loyalty programmes
+        loyalty_programmes = None
+        logger.debug(f"DEBUG: Checking for loyalty programmes in accommodation data")
+        logger.debug(f"DEBUG: Accommodation keys: {list(accommodation.keys())}")
+        
+        # Check for supported_loyalty_programme (singular) - this is what the API actually returns
+        if "supported_loyalty_programme" in accommodation and accommodation["supported_loyalty_programme"]:
+            logger.debug(f"DEBUG: Found supported_loyalty_programme field: {accommodation['supported_loyalty_programme']}")
+            from ..models.stays import LoyaltyProgramme
+            # Create a LoyaltyProgramme object from the reference string
+            loyalty_programmes = [LoyaltyProgramme(
+                reference=accommodation["supported_loyalty_programme"],
+                name=accommodation["supported_loyalty_programme"].replace("_", " ").title(),
+                logo_url_svg=None,
+                logo_url_png_small=None
+            )]
+            logger.debug(f"DEBUG: Created loyalty programme from supported_loyalty_programme: {loyalty_programmes[0].reference}")
+        elif "loyalty_programmes" in accommodation:
+            logger.debug(f"DEBUG: Found loyalty_programmes field: {accommodation['loyalty_programmes']}")
+            from ..models.stays import LoyaltyProgramme
+            loyalty_programmes = [LoyaltyProgramme(**lp) for lp in accommodation["loyalty_programmes"]]
+            logger.debug(f"DEBUG: Parsed {len(loyalty_programmes)} loyalty programmes")
+        else:
+            logger.debug(f"DEBUG: No loyalty programmes found in accommodation data")
+            # Check if loyalty programmes might be in a different location
+            if "loyalty" in accommodation:
+                logger.debug(f"DEBUG: Found 'loyalty' field: {accommodation['loyalty']}")
+            if "loyalty_info" in accommodation:
+                logger.debug(f"DEBUG: Found 'loyalty_info' field: {accommodation['loyalty_info']}")
+        
+        # Do not inject fallback if none present
         return Hotel(
             id=hotel_id,
             name=name,
@@ -276,7 +340,8 @@ class StaysEndpoint:
             guest_rating=guest_rating,
             amenities=amenities,
             images=images,
-            rooms=rooms or [Room(id=f"{hotel_id}_unknown", name="Room", rate=Rate(total_amount=Money(amount="0", currency="USD")))]
+            rooms=rooms or [Room(id=f"{hotel_id}_unknown", name="Room", rate=Rate(total_amount=Money(amount="0", currency="USD")))] ,
+            loyalty_programmes=loyalty_programmes
         )
     
     def _parse_room(self, room_data: Dict[str, Any]) -> Room:
@@ -474,3 +539,41 @@ async def update_hotel_booking(booking_id: str, data: dict) -> dict:
     client = get_client()
     stays_endpoint = StaysEndpoint(client)
     return await stays_endpoint.update_booking(booking_id, data)
+    
+async def fetch_loyalty_programmes() -> list:
+    """Convenience function to fetch all loyalty programmes from Duffel Stays."""
+    from ..client import get_client
+    client = get_client()
+    stays_endpoint = StaysEndpoint(client)
+    return await stays_endpoint.fetch_loyalty_programmes()
+
+async def fetch_quote_details(quote_id: str) -> dict:
+    """Fetch quote details for a given quote_id (hotel stay)."""
+    from ..client import get_client
+    client = get_client()
+    endpoint = f"/stays/quotes/{quote_id}"
+    return await client.get(endpoint)
+
+async def fetch_accommodation_reviews(accommodation_id: str, after: str = None, before: str = None, limit: int = 50) -> list:
+    """
+    Fetch guest reviews for an accommodation.
+    Only accepts accommodation_id (acc_...).
+    Returns a user-friendly message if no reviews are found or if an error occurs.
+    """
+    from ..client import get_client
+    client = get_client()
+
+    # Only accept acc_... IDs
+    if not (isinstance(accommodation_id, str) and accommodation_id.startswith("acc_")):
+        return [{"error": "Invalid accommodation_id. Please provide a valid accommodation ID (starting with 'acc_'), not a search result ID (srr_...)."}]
+
+    try:
+        endpoint = f"/stays/accommodation/{accommodation_id}/reviews"
+        params = {"limit": limit}
+        response = await client.get(endpoint, params=params)
+        reviews = response.get("data", {}).get("reviews", [])
+        if not reviews:
+            return [{"message": "No reviews found for this hotel yet."}]
+        return reviews
+    except Exception as e:
+        return [{"error": f"Could not fetch reviews: {str(e)}"}]

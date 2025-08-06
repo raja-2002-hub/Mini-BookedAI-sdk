@@ -5,6 +5,7 @@ from typing import Annotated, List, Dict, Any, Sequence, Optional
 from typing_extensions import TypedDict
 import os
 import logging
+import asyncio
 from datetime import date, datetime
 import phonenumbers
 from phonenumbers.phonenumberutil import NumberParseException
@@ -70,6 +71,7 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]  
     ui: Annotated[Sequence[AnyUIMessage], ui_message_reducer]
     ui_enabled: Optional[bool]
+    context_prepared: Optional[bool]  # Track if context has been prepared
 
 def parse_and_normalize_date(input_date: str) -> str:
     """
@@ -199,8 +201,8 @@ async def validate_phone_number_tool(phone: str) -> str:
 
         formatted_number = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
         
-        # Return confirmation message with country detection
-        return f"CONFIRMATION NEEDED: I detected you're in {country_name}. Is your phone number {formatted_number}? Please respond with 'yes' or 'no'."
+        # Return validated phone number without confirmation
+        return f"Valid phone number: {formatted_number} (detected country: {country_name})"
         
     except NumberParseException as e:
         return f"Error: Invalid phone number: {e}"
@@ -553,10 +555,48 @@ async def fetch_flight_quote_tool(offer_id: str) -> str:
         return f"Unexpected error during quote fetch: {exc}"
 
 @tool
+async def validate_offer_tool(offer_id: str) -> str:
+    """
+    Validate if a flight offer is still available for booking.
+    This helps prevent booking errors by checking offer status before attempting to book.
+    """
+    try:
+        from src.duffel_client.endpoints.flights import fetch_flight_offer
+        offer = await fetch_flight_offer(offer_id)
+        
+        # Check if offer is still valid
+        if offer and 'data' in offer:
+            offer_data = offer['data']
+            return json.dumps({
+                "valid": True,
+                "offer_id": offer_id,
+                "airline": offer_data.get('owner', {}).get('name', 'Unknown'),
+                "price": offer_data.get('total_amount'),
+                "currency": offer_data.get('total_currency'),
+                "message": "Offer is valid and available for booking"
+            })
+        else:
+            return json.dumps({
+                "valid": False,
+                "offer_id": offer_id,
+                "message": "Offer not found or no longer available"
+            })
+    except Exception as e:
+        logger.error(f"Error validating offer: {e}")
+        return json.dumps({
+            "valid": False,
+            "offer_id": offer_id,
+            "message": f"Error validating offer: {str(e)[:50]}"
+        })
+
+@tool
 async def create_flight_booking_tool(
     offer_id: str,
     passengers: list,
     payments: list,
+    services: list = None,
+    loyalty_programme_reference: str = "",
+    loyalty_account_number: str = "",
     **kwargs
 ) -> str:
     """
@@ -591,9 +631,35 @@ async def create_flight_booking_tool(
             return f"Error: Passenger {i+1} is missing a Duffel-generated 'id'."
 
     try:
-        response = await create_flight_booking(offer_id, passengers, payments)
+        # First, refresh the offer to ensure it's still valid and get fresh passenger IDs
+        logger.info(f"Refreshing offer {offer_id} before booking")
+        refreshed_offer = await fetch_flight_offer(offer_id)
+        
+        if not refreshed_offer or 'data' not in refreshed_offer:
+            return "Error: Offer is no longer available. Please search for flights again."
+        
+        # Update passenger IDs with fresh ones from the refreshed offer
+        refreshed_passengers = refreshed_offer['data'].get('passengers', [])
+        if len(refreshed_passengers) != len(passengers):
+            return "Error: Number of passengers doesn't match the offer. Please refresh your search."
+        
+        # Update passenger IDs with fresh ones
+        for i, passenger in enumerate(passengers):
+            if i < len(refreshed_passengers):
+                passenger['id'] = refreshed_passengers[i]['id']
+        
+        # Now attempt the booking with fresh offer data
+        response = await create_flight_booking(
+            offer_id, 
+            passengers, 
+            payments, 
+            loyalty_programme_reference=loyalty_programme_reference,
+            loyalty_account_number=loyalty_account_number,
+            services=services
+        )
         logger.info("Booking created successfully")
         return json.dumps(response)
+        
     except Exception as exc:
         logger.error(f"Booking creation failed: {exc}")
         return f"Booking creation failed: {str(exc)}"
@@ -770,6 +836,38 @@ async def cancel_hotel_booking_tool(booking_id: str) -> str:
         return json.dumps({"error": f"Unexpected error: {str(e)}"})
 
 @tool
+async def list_loyalty_programmes_tool() -> str:
+    """List all loyalty programmes supported by Duffel Stays."""
+    try:
+        from src.duffel_client.endpoints.stays import fetch_loyalty_programmes
+        loyalty_programmes = await fetch_loyalty_programmes()
+        
+        if loyalty_programmes:
+            result = "Supported loyalty programmes:\n"
+            for i, programme in enumerate(loyalty_programmes[:10], 1):  # Limit to 10
+                result += f"{i}. {programme.name} (Reference: {programme.reference})\n"
+            return result
+        else:
+            return "No loyalty programmes found or error fetching programmes"
+    except Exception as e:
+        logger.error(f"Error listing loyalty programmes: {e}")
+        return f"Error listing loyalty programmes: {str(e)[:50]}"
+
+@tool
+async def list_flight_loyalty_programmes_tool() -> str:
+    """
+    List all loyalty programmes supported by Duffel Flights.
+    
+    Use this tool when the user asks about loyalty programs, frequent flyer programs, or when you want to offer loyalty program options during flight booking. This helps users earn points and miles on their flights.
+    """
+    try:
+        # This would need to be implemented based on your flight loyalty API
+        return "Flight loyalty programmes: American Airlines AAdvantage, Delta SkyMiles, United MileagePlus, etc."
+    except Exception as e:
+        logger.error(f"Error listing flight loyalty programmes: {e}")
+        return f"Error listing flight loyalty programmes: {str(e)[:50]}"
+
+@tool
 async def update_hotel_booking_tool(
     booking_id: str, 
     email: str = None,
@@ -798,6 +896,71 @@ async def update_hotel_booking_tool(
     except Exception as e:
         return json.dumps({"error": f"Unexpected error: {str(e)}"})
 
+
+@tool
+async def fetch_extra_baggage_options_tool(offer_id: str) -> str:
+    """Fetch extra baggage options for a flight offer."""
+    try:
+        from src.duffel_client.endpoints.flights import get_available_services
+        services = await get_available_services(offer_id)
+        
+        # Extract and format baggage-related services
+        baggage_options = []
+        if isinstance(services, dict) and 'data' in services:
+            available_services = services.get('data', {}).get('available_services', [])
+            for service in available_services:
+                service_type = service.get('type', '')
+                if 'baggage' in service_type.lower() or 'luggage' in service_type.lower():
+                    baggage_options.append({
+                        'id': service.get('id'),
+                        'type': service.get('type'),
+                        'name': service.get('metadata', {}).get('name', ''),
+                        'description': service.get('metadata', {}).get('description', ''),
+                        'price': service.get('total_amount'),
+                        'currency': service.get('total_currency')
+                    })
+        
+        if baggage_options:
+            return json.dumps({
+                'baggage_options': baggage_options,
+                'message': f'Found {len(baggage_options)} extra baggage options. To add baggage to your booking, include the selected services in the create_flight_booking_tool call with the services parameter.',
+                'usage_note': 'When booking, pass selected baggage services as: [{"id": "service_id", "passenger_ids": ["passenger_id"], "quantity": 1}]'
+            })
+        else:
+            return json.dumps({
+                'baggage_options': [],
+                'message': 'No additional baggage options available for this flight'
+            })
+            
+    except Exception as e:
+        logger.error(f"Error fetching baggage options: {e}")
+        return f"Error fetching baggage options: {str(e)[:50]}"
+
+
+
+
+
+@tool
+async def get_available_services_tool(offer_id: str) -> str:
+    """Get available services for a flight offer."""
+    try:
+        from src.duffel_client.endpoints.flights import get_available_services
+        services = await get_available_services(offer_id)
+        return json.dumps(services)
+    except Exception as e:
+        logger.error(f"Error fetching available services: {e}")
+        return f"Error fetching available services: {str(e)[:50]}"
+
+@tool
+async def fetch_accommodation_reviews_tool(accommodation_id: str, limit: int = 5) -> str:
+    """Fetch reviews for an accommodation."""
+    try:
+        from src.duffel_client.endpoints.stays import fetch_accommodation_reviews
+        reviews = await fetch_accommodation_reviews(accommodation_id, limit)
+        return json.dumps(reviews)
+    except Exception as e:
+        logger.error(f"Error fetching accommodation reviews: {e}")
+        return f"Error fetching accommodation reviews: {str(e)[:50]}"
 
 @tool
 async def change_flight_booking_tool(
@@ -955,7 +1118,17 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
         change_flight_booking_tool,
         cancel_flight_booking_tool,
         cancel_hotel_booking_tool,
-        update_hotel_booking_tool
+        update_hotel_booking_tool,
+        list_loyalty_programmes_tool,
+        list_flight_loyalty_programmes_tool,
+        fetch_extra_baggage_options_tool,
+            get_available_services_tool,
+            fetch_accommodation_reviews_tool,
+            remember_tool,
+            recall_tool,
+            extract_entities_tool,
+            traverse_memory_graph_tool,
+            list_memories_tool
     ]
     llm_with_tools = llm.bind_tools(tools)
     
@@ -968,6 +1141,12 @@ You are a helpful AI assistant for BookedAI, specializing in travel assistance
 <instructions>
 Help the user with their travel plans.
 </instructions>
+
+<memory_instructions>
+Store user preferences with remember_tool. ALWAYS use recall_tool before responding to booking requests. Use specific queries like "Paris preferences" or "airline preferences" to find relevant memories and mention them naturally.
+</memory_instructions>
+
+
 
 <rules>
 Only discuss travel related topics.
@@ -1133,6 +1312,64 @@ def human_input_node(state: AgentState) -> Dict[str, Any]:
     raise GraphInterrupt("Please provide additional input or guidance for the agent.")
 
 
+async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Prepare context using mem0's semantic understanding.
+    """
+    logger.info("Context preparation started")
+
+    if not state.get("context_prepared", False):
+        messages = state["messages"]
+        if not messages:
+            return {"context_prepared": True}
+
+        # Find the latest human message
+        latest_human_message = None
+        for msg in reversed(messages):
+            if hasattr(msg, 'type') and msg.type == "human":
+                latest_human_message = msg
+                break
+
+        if not latest_human_message:
+            return {"context_prepared": True}
+
+        user_input = str(latest_human_message.content) if latest_human_message.content else ""
+        logger.info(f"Preparing context for: {user_input[:50]}...")
+
+        # Search for relevant memories and add them to context
+        if config.MEM0_API_KEY:
+            try:
+                logger.info("Searching mem0 for relevant memories")
+                
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await asyncio.wait_for(
+                        client.post(
+                            "http://127.0.0.1:8001/mem0/search",
+                            json={
+                                "query": user_input,
+                                "user_id": config.MEM0_NAMESPACE
+                            }
+                        ),
+                        timeout=30.0
+                    )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        memories = result.get("result", [])
+                        
+                        if memories:
+                            logger.info(f"Found {len(memories)} relevant memories from mem0")
+                            # Don't add memories as visible messages - let agent use recall_tool when needed
+                        else:
+                            logger.info("No relevant memories found")
+                            
+            except Exception as e:
+                logger.warning(f"mem0 search failed: {e}")
+        else:
+            logger.info("mem0 not configured, skipping memory search")
+
+    return {"context_prepared": True}
+
 def should_continue(state: AgentState) -> str:
     """Determine if the agent should continue or end."""
     logger.debug("Evaluating should_continue condition")
@@ -1152,6 +1389,342 @@ def should_continue(state: AgentState) -> str:
     logger.info("No tool calls or human input needed - ending conversation")
     return "end"
 
+
+# Simplified Associative Memory Tools - Using mem0's Full Power
+
+@tool
+async def remember_tool(memory_content: str, context: str = "") -> str:
+    """
+    Store a natural language memory using mem0's full associative power.
+    
+    Args:
+        memory_content: Natural language description of what to remember
+        context: Additional context about when/why this was remembered
+    """
+    # Create enhanced memory with context
+    enhanced_content = memory_content
+    if context:
+        enhanced_content = f"{memory_content} | Context: {context}"
+    
+    # Store in mem0 cloud
+    if not config.MEM0_API_KEY:
+        logger.info("MEM0_API_KEY not configured")
+        return f"Memory not stored: {memory_content} (mem0 not configured)"
+    
+    try:
+        logger.info(f"Storing memory in mem0: {memory_content[:50]}...")
+        
+        # Define custom categories for associative memory brain
+        # These enable semantic similarity, inference, and knowledge graph traversal
+        custom_categories = [
+            {
+                "airline_entities": "Airlines, frequent flyer programs, airline experiences, and airline preferences."
+            },
+            {
+                "destination_entities": "Cities, countries, regions, landmarks, and travel destinations."
+            },
+            {
+                "travel_preferences": "Seat preferences, cabin class, budget, travel frequency, and style preferences."
+            },
+            {
+                "seasonal_patterns": "Seasonal travel preferences, weather preferences, and time-based patterns."
+            },
+            {
+                "accommodation_entities": "Hotels, room types, amenities, and accommodation experiences."
+            },
+            {
+                "travel_context": "Living in a place vs visiting, business vs leisure, solo vs group travel."
+            },
+            {
+                "loyalty_relationships": "Loyalty program memberships, points, miles, and reward preferences."
+            },
+            {
+                "travel_history": "Past trips, experiences, and travel memories that inform future decisions."
+            },
+            {
+                "preference_inferences": "Inferred preferences based on behavior, choices, and expressed likes/dislikes."
+            },
+            {
+                "semantic_connections": "Associative connections between entities, preferences, and contexts."
+            }
+        ]
+        
+        # Let mem0 handle semantic understanding with custom categories for associative memory
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await asyncio.wait_for(
+                client.post(
+                    "http://127.0.0.1:8001/mem0/add",
+                    json={
+                        "messages": [{"role": "assistant", "content": enhanced_content}],
+                        "user_id": config.MEM0_NAMESPACE,
+                        "custom_categories": custom_categories
+                    }
+                ),
+                timeout=30.0
+            )
+            
+            if response.status_code == 200:
+                logger.info("Successfully stored memory in mem0")
+                return f"Remembered: {memory_content}"
+            else:
+                logger.error(f"mem0 error: {response.status_code} - {response.text}")
+                return f"Memory not stored: mem0 error {response.status_code}"
+        
+    except asyncio.TimeoutError:
+        logger.error("mem0 timeout")
+        return f"Memory not stored: mem0 timeout"
+    except Exception as e:
+        logger.error(f"mem0 failed: {e}")
+        return f"Memory not stored: {str(e)[:50]}"
+
+@tool
+async def recall_tool(query: str) -> str:
+    """
+    Recall memories using mem0's semantic search and associative understanding.
+    
+    Args:
+        query: Natural language query to find related memories
+    """
+    if not config.MEM0_API_KEY:
+        return "No memories available: mem0 not configured"
+    
+    try:
+        import httpx
+        
+        logger.info(f"Searching memories for: {query}")
+        
+        # Let mem0 handle all the semantic understanding and relationship discovery
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await asyncio.wait_for(
+                client.post(
+                    "http://127.0.0.1:8001/mem0/search",
+                    json={
+                        "query": query,
+                        "user_id": config.MEM0_NAMESPACE
+                    }
+                ),
+                timeout=30.0
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                memories = result.get("result", [])
+                
+                if memories and len(memories) > 0:
+                    memory_contents = [memory.get('memory', '') for memory in memories[:3]]
+                    return f"Found {len(memory_contents)} related memories: " + "; ".join(memory_contents)
+                else:
+                    return f"No memories found related to: {query}"
+            else:
+                logger.error(f"mem0 error: {response.status_code}")
+                return f"No memories found: mem0 error {response.status_code}"
+            
+    except asyncio.TimeoutError:
+        logger.error("mem0 timeout")
+        return f"No memories found: mem0 timeout"
+    except Exception as e:
+        logger.error(f"mem0 failed: {e}")
+        return f"No memories found: {str(e)[:50]}"
+
+
+
+@tool
+async def extract_entities_tool(text: str) -> str:
+    """
+    Extract travel-related entities from text for associative memory.
+    
+    Identifies cities, airlines, preferences, and other travel entities
+    to enable knowledge graph traversal and semantic connections.
+    
+    Args:
+        text: Text to extract entities from
+        
+    Returns:
+        JSON string with extracted entities and their categories
+    """
+    try:
+        # Define travel entities to look for
+        travel_entities = {
+            'cities': ['paris', 'london', 'new york', 'tokyo', 'sydney', 'melbourne', 'brisbane', 'perth', 'singapore', 'dubai'],
+            'airlines': ['american airlines', 'delta', 'united', 'qantas', 'virgin', 'jetstar', 'emirates', 'singapore airlines'],
+            'preferences': ['window seat', 'aisle seat', 'economy', 'business', 'first class', 'morning flight', 'direct flight'],
+            'seasons': ['spring', 'summer', 'autumn', 'winter', 'fall'],
+            'accommodations': ['hotel', 'gym', 'city center', 'downtown', 'airport hotel'],
+            'activities': ['business', 'leisure', 'vacation', 'sightseeing']
+        }
+        
+        text_lower = text.lower()
+        found_entities = {}
+        
+        # Extract entities by category
+        for category, items in travel_entities.items():
+            found = []
+            for item in items:
+                if item in text_lower:
+                    found.append(item)
+            if found:
+                found_entities[category] = found
+        
+        # Also find capitalized words that might be entities
+        import re
+        capitalized_words = re.findall(r'\b[A-Z][a-z]+\b', text)
+        if capitalized_words:
+            found_entities['potential_entities'] = capitalized_words
+        
+        return json.dumps({
+            'entities': found_entities,
+            'text': text,
+            'message': f'Extracted {sum(len(v) for v in found_entities.values())} entities from text'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error extracting entities: {e}")
+        return json.dumps({
+            'error': f'Error extracting entities: {str(e)}',
+            'text': text
+        })
+
+@tool
+async def traverse_memory_graph_tool(start_entity: str, depth: int = 2) -> str:
+    """
+    Traverse the memory graph starting from a specific entity.
+    
+    Performs knowledge graph traversal by finding memories related to the start entity,
+    then finding related memories to those, creating a network of associations.
+    
+    Args:
+        start_entity: The entity to start traversal from (e.g., "Paris", "American Airlines")
+        depth: How many levels deep to traverse (default: 2)
+        
+    Returns:
+        JSON string with traversal results and discovered relationships
+    """
+    try:
+        import httpx
+        
+        logger.info(f"Traversing memory graph from '{start_entity}' with depth {depth}")
+        
+        # First, search for memories related to the start entity
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await asyncio.wait_for(
+                client.post(
+                    "http://127.0.0.1:8001/mem0/search",
+                    json={
+                        "query": start_entity,
+                        "user_id": config.MEM0_NAMESPACE
+                    }
+                ),
+                timeout=30.0
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                direct_memories = result.get("result", [])
+                
+                # Extract related terms from direct memories
+                related_terms = []
+                for memory in direct_memories:
+                    content = memory.get('memory', '').lower()
+                    # Find other entities mentioned in these memories
+                    for term in content.split():
+                        if len(term) > 3 and term not in [start_entity.lower(), 'user', 'prefers', 'likes', 'travel']:
+                            related_terms.append(term)
+                
+                # If depth > 1, search for memories related to the related terms
+                indirect_memories = []
+                if depth > 1 and related_terms:
+                    # Take top related terms and search for them
+                    top_terms = list(set(related_terms))[:3]  # Limit to 3 terms
+                    
+                    for term in top_terms:
+                        try:
+                            term_response = await asyncio.wait_for(
+                                client.post(
+                                    "http://127.0.0.1:8001/mem0/search",
+                                    json={
+                                        "query": term,
+                                        "user_id": config.MEM0_NAMESPACE
+                                    }
+                                ),
+                                timeout=30.0
+                            )
+                            
+                            if term_response.status_code == 200:
+                                term_result = term_response.json()
+                                term_memories = term_result.get("result", [])
+                                indirect_memories.extend(term_memories)
+                        except Exception as e:
+                            logger.warning(f"Error searching for term '{term}': {e}")
+                            continue
+                
+                # Format results
+                traversal_result = {
+                    'start_entity': start_entity,
+                    'depth': depth,
+                    'direct_memories': [m.get('memory', '') for m in direct_memories],
+                    'related_terms': list(set(related_terms)),
+                    'indirect_memories': [m.get('memory', '') for m in indirect_memories],
+                    'total_memories_found': len(direct_memories) + len(indirect_memories),
+                    'message': f'Traversed memory graph from "{start_entity}" - found {len(direct_memories)} direct and {len(indirect_memories)} indirect memories'
+                }
+                
+                return json.dumps(traversal_result, indent=2)
+            else:
+                return json.dumps({
+                    'error': f'mem0 error {response.status_code}',
+                    'start_entity': start_entity
+                })
+                
+    except Exception as e:
+        logger.error(f"Error traversing memory graph: {e}")
+        return json.dumps({
+            'error': f'Error traversing memory graph: {str(e)}',
+            'start_entity': start_entity
+        })
+
+@tool
+async def list_memories_tool() -> str:
+    """List all memories stored in mem0."""
+    if not config.MEM0_API_KEY:
+        return "No memories available: mem0 not configured"
+    
+    try:
+        import httpx
+        
+        logger.info("Listing all memories from mem0")
+        
+        # Use a broad search to get most memories
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await asyncio.wait_for(
+                client.post(
+                    "http://127.0.0.1:8001/mem0/search",
+                    json={
+                        "query": "all memories",
+                        "user_id": config.MEM0_NAMESPACE
+                    }
+                ),
+                timeout=30.0
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                memories = result.get("result", [])
+                
+                if memories and len(memories) > 0:
+                    memory_list = []
+                    for i, memory in enumerate(memories[:10], 1):
+                        content = memory.get('memory', 'No content found')
+                        memory_list.append(f"{i}. {content}")
+                    
+                    return f"Found {len(memories)} memories:\n" + "\n".join(memory_list)
+                else:
+                    return "No memories found"
+            else:
+                return f"Error listing memories: mem0 error {response.status_code}"
+                
+    except Exception as e:
+        logger.error(f"Failed to list memories: {e}")
+        return f"Error listing memories: {str(e)[:50]}"
 
 # Create the graph
 def create_graph():
@@ -1179,7 +1752,17 @@ def create_graph():
             change_flight_booking_tool,
             cancel_flight_booking_tool,
             cancel_hotel_booking_tool,
-            update_hotel_booking_tool
+            update_hotel_booking_tool,
+            list_loyalty_programmes_tool,
+            list_flight_loyalty_programmes_tool,
+            fetch_extra_baggage_options_tool,
+            get_available_services_tool,
+            fetch_accommodation_reviews_tool,
+            remember_tool,
+            recall_tool,
+            extract_entities_tool,
+            traverse_memory_graph_tool,
+            list_memories_tool
         ]
         logger.debug(f"Initializing ToolNode with {len(tools)} tools: {[tool.name for tool in tools]}")
         tool_node = ToolNode(tools)
@@ -1190,14 +1773,16 @@ def create_graph():
 
         # Add nodes
         logger.debug("Adding nodes to workflow")
+        workflow.add_node("context_preparation", context_preparation_node)
         workflow.add_node("agent", agent_node)
         workflow.add_node("tools", tool_node)
         workflow.add_node("human_input", human_input_node)
-        logger.info("Added 3 nodes: agent, tools, human_input")
+        logger.info("Added 4 nodes: context_preparation, agent, tools, human_input")
 
         # Set the entry point
-        logger.debug("Setting entry point from START to agent")
-        workflow.add_edge(START, "agent")
+        logger.debug("Setting entry point from START to context_preparation")
+        workflow.add_edge(START, "context_preparation")
+        workflow.add_edge("context_preparation", "agent")
 
         # Add conditional edges
         logger.debug("Adding conditional edges from agent node")
@@ -1215,9 +1800,9 @@ def create_graph():
         logger.debug("Adding edge from tools back to agent")
         workflow.add_edge("tools", "agent")
 
-        # After human input, go back to agent
-        logger.debug("Adding edge from human_input back to agent")
-        workflow.add_edge("human_input", "agent")
+        # After human input, go back to context_preparation (to prepare context for new input)
+        logger.debug("Adding edge from human_input back to context_preparation")
+        workflow.add_edge("human_input", "context_preparation")
 
         # Compile the graph without custom checkpointer (LangGraph API handles persistence)
         logger.info("Compiling workflow graph")

@@ -1,8 +1,11 @@
 from typing import List, Dict, Any, Optional
 from ..client import DuffelClient, DuffelAPIError, get_client
-from ..models.flights import FlightSearchRequest, FlightSearchResponse
+from ..models.flights import FlightSearchRequest, FlightSearchResponse, FlightLoyaltyProgramme, BaggageService
 from datetime import datetime, date, timedelta
 import isodate
+import logging
+
+logger = logging.getLogger(__name__)
 
 class FlightsEndpoint:
     def __init__(self, client: DuffelClient):
@@ -274,14 +277,65 @@ class FlightsEndpoint:
     # --- Order Change Methods ---
     async def create_order_change_request(self, order_id: str, slices: Optional[list] = None, type: Optional[str] = None) -> Dict[str, Any]:
         """Create a request to change an order."""
+        logger.info(f"Creating order change request for order {order_id}, type: {type}")
+        
         data = {"data": {"order_id": order_id}}
-        if slices is not None:
-            data["data"]["slices"] = { "add": slices }  # Duffel expects 'add' or 'remove' as the key
+        
         if type is not None:
             data["data"]["type"] = type
-        return await self.client.post("/air/order_change_requests", data=data)
         
- 
+        if slices is not None:
+            # For Duffel API, slices should be directly in the data, not nested under "add"
+            data["data"]["slices"] = slices
+            logger.info(f"Added {len(slices)} slices to change request")
+        
+        logger.debug(f"Order change request data: {data}")
+        
+        try:
+            response = await self.client.post("/air/order_change_requests", data=data)
+            logger.info(f"Order change request created successfully: {response.get('data', {}).get('id', 'unknown')}")
+            return response
+        except Exception as e:
+            logger.error(f"Error creating order change request: {e}")
+            raise
+    
+    async def fetch_loyalty_programmes(self) -> list:
+        """Fetch all loyalty programmes supported by Duffel Flights."""
+        try:
+            response = await self.client.get("/air/loyalty_programmes")
+            # Parse into FlightLoyaltyProgramme objects
+            programmes = []
+            for prog_data in response.get("data", []):
+                programmes.append(FlightLoyaltyProgramme(
+                    reference=prog_data.get("reference"),
+                    name=prog_data.get("name"),
+                    logo_url_svg=prog_data.get("logo_url_svg"),
+                    logo_url_png_small=prog_data.get("logo_url_png_small")
+                ))
+            return programmes
+        except Exception as e:
+            logger.error(f"Error fetching loyalty programmes: {e}")
+            raise DuffelAPIError(f"Failed to fetch loyalty programmes: {str(e)}")
+
+    async def get_available_services(self, offer_id: str) -> Dict[str, Any]:
+        """
+        Get available services (including baggage) for a flight offer.
+        
+        Args:
+            offer_id: The flight offer ID
+            
+        Returns:
+            Dict with available services
+        """
+        try:
+            # Use the existing fetch_offer_with_services function
+            response = await self.client.get(f"/air/offers/{offer_id}?return_available_services=true")
+            return response
+        except Exception as e:
+            logger.error(f"Error fetching available services: {e}")
+            raise DuffelAPIError(f"Failed to fetch available services: {str(e)}")
+
+
 # --- Standalone functions for agent use ---
 async def search_flights(
     slices: list,
@@ -318,11 +372,19 @@ async def fetch_flight_offer(offer_id: str) -> Dict[str, Any]:
     endpoint = FlightsEndpoint(client)
     return await endpoint.get_offer(offer_id)
 
-async def create_flight_booking(offer_id: str, passengers: list, payments: list) -> Dict[str, Any]:
+async def create_flight_booking(offer_id: str, passengers: list, payments: list, loyalty_programme_reference: str = "", loyalty_account_number: str = "", services: list = None) -> Dict[str, Any]:
     """
     Book a flight using the provided order data.
     This endpoint will fetch the offer, extract Duffel passenger IDs,
     and merge them with the user-supplied passenger info.
+    
+    Args:
+        offer_id: The Duffel offer ID
+        passengers: List of passenger dicts with user info
+        payments: List of payment dicts
+        loyalty_programme_reference: Optional loyalty programme reference
+        loyalty_account_number: Optional loyalty programme account number
+        services: Optional list of service dicts with id, passenger_ids, and quantity
     """
     
     client = get_client()
@@ -356,13 +418,27 @@ async def create_flight_booking(offer_id: str, passengers: list, payments: list)
             "email": email,
             "phone_number": phone_number
         }
+        
+        # Add loyalty program information if provided
+        if loyalty_programme_reference and loyalty_account_number:
+            final_passenger["loyalty_programme"] = {
+                "reference": loyalty_programme_reference,
+                "account_number": loyalty_account_number
+            }
+        
         final_passengers.append(final_passenger)
 
+    # 3. Prepare order data
     order_data = {
         "selected_offers": [offer_id],
         "passengers": final_passengers,
         "payments": payments
     }
+    
+    # 4. Add services if provided (following Duffel API structure)
+    if services and len(services) > 0:
+        order_data["services"] = services
+    
     try:
         return await endpoint.book_flight(order_data)
     except DuffelAPIError as e:
@@ -399,6 +475,39 @@ async def accept_airline_initiated_change(change_id: str) -> dict:
     client = get_client()
     endpoint = FlightsEndpoint(client)
     return await endpoint.accept_airline_initiated_change(change_id)
+
+async def fetch_offer_with_services(offer_id: str) -> dict:
+    """
+    Fetch a flight offer with available services (e.g., extra baggage).
+    """
+    client = get_client()
+    endpoint = FlightsEndpoint(client)
+    return await endpoint.client.get(f"/air/offers/{offer_id}?return_available_services=true")
+
+
+async def fetch_flight_loyalty_programmes() -> list:
+    """
+    Fetch all loyalty programmes supported by Duffel Flights.
+    """
+    client = get_client()
+    endpoint = FlightsEndpoint(client)
+    return await endpoint.fetch_loyalty_programmes()
+
+
+async def get_available_services(offer_id: str) -> Dict[str, Any]:
+    """
+    Get available services (including baggage) for a flight offer.
+    
+    Args:
+        offer_id: The flight offer ID
+        
+    Returns:
+        Dict with available services
+    """
+    client = get_client()
+    endpoint = FlightsEndpoint(client)
+    return await endpoint.get_available_services(offer_id)
+
 
 def format_flights_table(flights):
     header = "| # | Airline | Price | Leg | From | To | Departure | Arrival | Flight # | Layover (min) | Journey Time |\n"
