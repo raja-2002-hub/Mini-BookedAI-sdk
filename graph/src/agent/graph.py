@@ -1,9 +1,10 @@
 """
 LangGraph Agent for BookedAI
 """
-from typing import Annotated, List, Dict, Any, Sequence, Optional
+from typing import Annotated, List, Dict, Any, Sequence, Optional, Deque
 from typing_extensions import TypedDict
 import os
+from collections import deque
 import logging
 import asyncio
 from datetime import date, datetime
@@ -25,7 +26,7 @@ except ImportError:
 import json
 
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage, SystemMessage, AIMessage
 from langchain_core.tools import tool
 from pydantic import SecretStr
 
@@ -40,6 +41,8 @@ from src.duffel_client.endpoints.stays import search_hotels, fetch_hotel_rates, 
 from src.duffel_client.endpoints.flights import search_flights, format_flights_markdown, get_seat_maps,fetch_flight_offer, create_flight_booking, list_airline_initiated_changes, update_airline_initiated_change, accept_airline_initiated_change
 from src.duffel_client.client import DuffelAPIError
 from src.config import config
+from mem0 import AsyncMemoryClient
+
 
 # --- Flight Order Change Tools ---
 from src.duffel_client.endpoints.flights import (
@@ -57,6 +60,9 @@ TOOL_UI_MAPPING = {
     "search_flights_tool": "flightResults",
 }
 
+# Module-level scratchpad for recent user texts (set by context preparation)
+LAST_USER_TEXTS: Deque[str] = deque(maxlen=5)
+
 # Log UI-related imports and configurations
 logger.info(f"[MODULE INIT] TOOL_UI_MAPPING loaded: {TOOL_UI_MAPPING}")
 try:
@@ -73,7 +79,7 @@ class AgentState(TypedDict):
     ui_enabled: Optional[bool]
     context_prepared: Optional[bool]  # Track if context has been prepared
 
-def parse_and_normalize_date(input_date: str) -> str:
+async def parse_and_normalize_date(input_date: str) -> str:
     """
     Parse a date string using dateparser and ensure it is in the future.
     If the date is in the past (even after rolling to this year), keep rolling forward to the next year until it is in the future.
@@ -83,10 +89,14 @@ def parse_and_normalize_date(input_date: str) -> str:
     try:
         logger.info(f"[DEBUG] parse_and_normalize_date called with input: {input_date}")
         
-        # First try to parse with dateparser
+        # First try to parse with dateparser (offload to thread to avoid blocking event loop)
         dt = None
         try:
-            dt = dateparser.parse(input_date, settings={'PREFER_DATES_FROM': 'future'})
+            dt = await asyncio.to_thread(
+                dateparser.parse,
+                input_date,
+                settings={'PREFER_DATES_FROM': 'future'}
+            )
         except Exception as parse_error:
             logger.info(f"[DEBUG] dateparser.parse failed: {parse_error}")
         
@@ -233,8 +243,8 @@ async def search_flights_tool(
         for seg in slices:
             if not all(k in seg for k in ("origin", "destination", "departure_date")):
                 return "Error: Each slice must have 'origin', 'destination', and 'departure_date'."
-            # Normalize the departure_date
-            seg["departure_date"] = parse_and_normalize_date(seg["departure_date"])
+            # Normalize the departure_date (async)
+            seg["departure_date"] = await parse_and_normalize_date(seg["departure_date"])
             # Date validation
             try:
                 dep_date = datetime.strptime(seg["departure_date"], "%Y-%m-%d").date()
@@ -294,9 +304,9 @@ async def search_hotels_tool(
             adults = 1
         if children is None:
             children = 0
-        # Validate date format and parse dates
-        check_in_date = parse_and_normalize_date(check_in_date)
-        check_out_date = parse_and_normalize_date(check_out_date)
+        # Validate date format and parse dates (async)
+        check_in_date = await parse_and_normalize_date(check_in_date)
+        check_out_date = await parse_and_normalize_date(check_out_date)
         logger.debug (f"Normalized dates - Check-in: {check_in_date}, Check-out: {check_out_date}")
         try:
             check_in = datetime.strptime(check_in_date, "%Y-%m-%d").date()
@@ -1122,13 +1132,20 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
         list_loyalty_programmes_tool,
         list_flight_loyalty_programmes_tool,
         fetch_extra_baggage_options_tool,
-            get_available_services_tool,
+        get_available_services_tool,
             fetch_accommodation_reviews_tool,
-            remember_tool,
+        remember_tool,
             recall_tool,
             extract_entities_tool,
             traverse_memory_graph_tool,
-            list_memories_tool
+            list_memories_tool,
+            delete_memory_tool,
+            delete_memories_by_query_tool,
+            delete_all_namespace_memories_tool,
+            pin_memory_tool,
+            unpin_memory_tool,
+            update_memory_importance_tool,
+            prune_memories_tool
     ]
     llm_with_tools = llm.bind_tools(tools)
     
@@ -1139,13 +1156,13 @@ You are a helpful AI assistant for BookedAI, specializing in travel assistance
 </identity>
 
 <instructions>
-Help the user with their travel plans.
+Help the user with their travel plans in a conversational, personal way.
+Be friendly and natural - like chatting with a helpful travel friend who remembers your preferences and mentions them naturally throughout the conversation.
 </instructions>
 
-<memory_instructions>
-Store user preferences with remember_tool. ALWAYS use recall_tool before responding to booking requests. Use specific queries like "Paris preferences" or "airline preferences" to find relevant memories and mention them naturally.
-</memory_instructions>
-
+ <memory_instructions>
+ Store user preferences with remember_tool. When the user asks to search or book, always use recall_tool first to fetch relevant preferences (and if results are thin or ambiguous, call traverse_memory_graph_tool with depth=1 on any strong anchor detected in the latest user text). Briefly summarize any recalled preferences in your first reply as a short sentence (no more than 1 line) before asking follow‑ups.
+ </memory_instructions>
 
 
 <rules>
@@ -1318,56 +1335,175 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
     """
     logger.info("Context preparation started")
 
-    if not state.get("context_prepared", False):
-        messages = state["messages"]
-        if not messages:
-            return {"context_prepared": True}
+    messages = state["messages"]
+    out_messages: List[BaseMessage] = []
+    if not messages:
+        return {"context_prepared": True}
 
-        # Find the latest human message
-        latest_human_message = None
-        for msg in reversed(messages):
-            if hasattr(msg, 'type') and msg.type == "human":
-                latest_human_message = msg
-                break
+    # Find the latest human message
+    latest_human_message = None
+    for msg in reversed(messages):
+        if hasattr(msg, 'type') and msg.type == "human":
+            latest_human_message = msg
+            break
 
-        if not latest_human_message:
-            return {"context_prepared": True}
+    if not latest_human_message:
+        return {"context_prepared": True}
 
-        user_input = str(latest_human_message.content) if latest_human_message.content else ""
-        logger.info(f"Preparing context for: {user_input[:50]}...")
+    user_input = str(latest_human_message.content) if latest_human_message.content else ""
+    # Update module-level scratch so tools can read salient terms without modifying agent node/prompt
+    try:
+        from collections import deque as _deque
+        global LAST_USER_TEXTS
+        LAST_USER_TEXTS.append(user_input)
+    except Exception:
+        pass
+    logger.info(f"Preparing context for: {user_input[:50]}... (background)")
 
-        # Search for relevant memories and add them to context
-        if config.MEM0_API_KEY:
+    # Deterministic, inline context enrichment (no background scheduling)
+    if config.MEM0_API_KEY:
+        try:
+            # Pre-warm and collect quick top memories for this input (use sync client in thread)
+            from mem0 import MemoryClient as _SyncMem0Client
+            _sync_client_cp = _SyncMem0Client(api_key=config.MEM0_API_KEY)
+            def _sync_search_user_input() -> Any:
+                return _sync_client_cp.search(user_input, user_id=config.MEM0_NAMESPACE)
+            rec = await asyncio.to_thread(_sync_search_user_input)
+            top = "; ".join([m.get('memory', '') for m in (rec or [])[:2]])
+
+            # Conservatively auto-remember durable preferences
+            text_lower = user_input.lower()
+            prefer_markers = [
+                "i like ", "i love ", "i prefer ", "prefer ", "usually ", "always ", "never ",
+                "window seat", "aisle seat", "economy", "business", "first class", "loyalty", "frequent flyer",
+                "direct flight", "direct flights", "nonstop", "non-stop", "no layover", "no layovers",
+                "morning flight", "evening flight", "overnight flight", "red eye", "redeye",
+                "breakfast", "pool", "spa", "gym", "parking", "wifi", "city center", "downtown", "near airport",
+                "boutique", "chain hotel", "suite", "king bed", "twin bed", "balcony", "sea view", "ocean view", "quiet area",
+                "non-smoking",
+            ]
+            skip_markers = [
+                "book ", "search ", "find flight", "find hotel", "book hotel", "book stay",
+                "quote", "offer", "rate ", "rate_id", "srr_", "rat_", "off_",
+                "cancel ", "change ", "update ", "check-in", "check out", "check-out",
+            ]
+            if any(m in text_lower for m in prefer_markers) and not any(s in text_lower for s in skip_markers):
+                try:
+                    remembered = await remember_tool.ainvoke({
+                        "memory_content": f"User preference: {user_input.strip()}",
+                        "context": "auto-captured in context preparation",
+                    })
+                    # Emit a visible tool message so it shows in UI when auto-remember triggers
+                    try:
+                        out_messages.append(
+                            ToolMessage(
+                                content=str(remembered),
+                                name="remember_tool",
+                                tool_call_id=f"auto_remember_{datetime.utcnow().isoformat()}",
+                            )
+                        )
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+            # Anchor extraction: prefer known destinations/aliases, then filtered proper nouns
+            import re as _re
+            anchors: list[str] = []
+            known_cities = [
+                'paris','london','new york','tokyo','sydney','melbourne','brisbane','perth','singapore','dubai'
+            ]
+            alias_to_city = {
+                'melb': 'Melbourne',
+                'nyc': 'New York',
+                'la': 'Los Angeles',
+                'sf': 'San Francisco',
+            }
+            # First, match aliases and full city names in the text
+            for alias, full in alias_to_city.items():
+                if alias in text_lower and full not in anchors:
+                    anchors.append(full)
+            for city in known_cities:
+                if city in text_lower:
+                    name = city.title()
+                    if name not in anchors:
+                        anchors.append(name)
+            # If none found, fallback to proper nouns but ignore common stopwords
+            if not anchors:
+                stopwords = {"BOOK","FLIGHT","FROM","TO","PLEASE","HI","HELLO"}
+                proper = _re.findall(r"\b[A-Z][A-Za-z]{2,}\b", user_input)
+                for token in proper:
+                    if token.upper() in stopwords:
+                        continue
+                    anchors.append(token)
+                    break
+
+            # For each detected anchor, pull direct memories and traverse 1-hop
+            for anchor in anchors[:2]:
+                try:
+                    # Direct search for the anchor (sync client in thread)
+                    try:
+                        from mem0 import MemoryClient as _SyncMem0Client2
+                        _sc = _SyncMem0Client2(api_key=config.MEM0_API_KEY)
+                        def _sync_search_anchor() -> Any:
+                            return _sc.search(anchor, version="v2", filters={"user_id": config.MEM0_NAMESPACE})
+                        direct_res = await asyncio.to_thread(_sync_search_anchor)
+                        if direct_res:
+                            top_snip = "; ".join([m.get('memory','') for m in direct_res[:2] if m.get('memory')])
+                            if top_snip:
+                                top = (top + "; " + top_snip).strip("; ") if top else top_snip
+                    except Exception:
+                        pass
+                    # Lightweight traversal
+                    traversal_raw = await traverse_memory_graph_tool.ainvoke({
+                        "start_entity": anchor,
+                        "depth": 1,
+                    })
+                    import json as _json
+                    t = _json.loads(traversal_raw)
+                    direct = t.get("direct_memories", [])[:2]
+                    indirect = t.get("indirect_memories", [])[:2]
+                    graph_snip = "; ".join([*direct, *indirect])
+                    if graph_snip:
+                        top = (top + "; " + graph_snip).strip("; ") if top else graph_snip
+                except Exception:
+                    pass
+
+            if top:
+                hint = SystemMessage(content=f"Internal context: {top}")
+                out_messages.append(hint)
+            # Also run an explicit recall and insert both a visible tool result and a compact hidden hint
             try:
-                logger.info("Searching mem0 for relevant memories")
-                
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await asyncio.wait_for(
-                        client.post(
-                            "http://127.0.0.1:8001/mem0/search",
-                            json={
-                                "query": user_input,
-                                "user_id": config.MEM0_NAMESPACE
-                            }
-                        ),
-                        timeout=30.0
-                    )
-                    
-                    if response.status_code == 200:
-                        result = response.json()
-                        memories = result.get("result", [])
-                        
-                        if memories:
-                            logger.info(f"Found {len(memories)} relevant memories from mem0")
-                            # Don't add memories as visible messages - let agent use recall_tool when needed
-                        else:
-                            logger.info("No relevant memories found")
-                            
-            except Exception as e:
-                logger.warning(f"mem0 search failed: {e}")
-        else:
-            logger.info("mem0 not configured, skipping memory search")
+                recall_out = await recall_tool.ainvoke({
+                    "query": user_input,
+                    "top_k": 6,
+                })
+                if isinstance(recall_out, str) and recall_out.strip():
+                    # Visible tool message (ensure it renders even if UI filters tool messages by default)
+                    if recall_out.lower().startswith("related memories:"):
+                        out_messages.append(
+                            ToolMessage(
+                                content=recall_out,
+                                name="recall_tool",
+                                tool_call_id=f"auto_recall_context_{datetime.utcnow().isoformat()}",
+                            )
+                        )
+                        # Hidden compact system hint distilled from recall string
+                        try:
+                            compact = recall_out.replace("Related memories:", "").strip()
+                            compact = "; ".join([s.strip() for s in compact.split(";")[:3] if s.strip()])
+                            if compact:
+                                out_messages.insert(0, SystemMessage(content=f"Internal recall: {compact}"))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"Context preparation mem0 enrichment failed: {e}")
 
+    # Always mark prepared for this turn; will run again next turn
+    if out_messages:
+        return {"context_prepared": True, "messages": out_messages}
     return {"context_prepared": True}
 
 def should_continue(state: AgentState) -> str:
@@ -1390,8 +1526,6 @@ def should_continue(state: AgentState) -> str:
     return "end"
 
 
-# Simplified Associative Memory Tools - Using mem0's Full Power
-
 @tool
 async def remember_tool(memory_content: str, context: str = "") -> str:
     """
@@ -1413,63 +1547,128 @@ async def remember_tool(memory_content: str, context: str = "") -> str:
     
     try:
         logger.info(f"Storing memory in mem0: {memory_content[:50]}...")
-        
-        # Define custom categories for associative memory brain
-        # These enable semantic similarity, inference, and knowledge graph traversal
-        custom_categories = [
-            {
-                "airline_entities": "Airlines, frequent flyer programs, airline experiences, and airline preferences."
-            },
-            {
-                "destination_entities": "Cities, countries, regions, landmarks, and travel destinations."
-            },
-            {
-                "travel_preferences": "Seat preferences, cabin class, budget, travel frequency, and style preferences."
-            },
-            {
-                "seasonal_patterns": "Seasonal travel preferences, weather preferences, and time-based patterns."
-            },
-            {
-                "accommodation_entities": "Hotels, room types, amenities, and accommodation experiences."
-            },
-            {
-                "travel_context": "Living in a place vs visiting, business vs leisure, solo vs group travel."
-            },
-            {
-                "loyalty_relationships": "Loyalty program memberships, points, miles, and reward preferences."
-            },
-            {
-                "travel_history": "Past trips, experiences, and travel memories that inform future decisions."
-            },
-            {
-                "preference_inferences": "Inferred preferences based on behavior, choices, and expressed likes/dislikes."
-            },
-            {
-                "semantic_connections": "Associative connections between entities, preferences, and contexts."
-            }
+
+        # Define custom categories using the shape expected by mem0 (name + description)
+
+        custom_categories_definitions = [
+            {"name": "airline_entities", "description": "Airlines, frequent flyer programs, airline experiences, and airline preferences."},
+            {"name": "destination_entities", "description": "Cities, countries, regions, landmarks, and travel destinations."},
+            {"name": "travel_preferences", "description": "Seat preferences, cabin class, budget, travel frequency, and style preferences."},
+            {"name": "seasonal_patterns", "description": "Seasonal travel preferences, weather preferences, and time-based patterns."},
+            {"name": "accommodation_entities", "description": "Hotels, room types, amenities, and accommodation experiences."},
+            {"name": "travel_context", "description": "Living in a place vs visiting, business vs leisure, solo vs group travel."},
+            {"name": "loyalty_relationships", "description": "Loyalty program memberships, points, miles, and reward preferences."},
+            {"name": "travel_history", "description": "Past trips, experiences, and travel memories that inform future decisions."},
+            {"name": "preference_inferences", "description": "Inferred preferences based on behavior, choices, and expressed likes/dislikes."},
+            {"name": "semantic_connections", "description": "Associative connections between entities, preferences, and contexts."},
         ]
         
-        # Let mem0 handle semantic understanding with custom categories for associative memory
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await asyncio.wait_for(
-                client.post(
-                    "http://127.0.0.1:8001/mem0/add",
-                    json={
-                        "messages": [{"role": "assistant", "content": enhanced_content}],
-                        "user_id": config.MEM0_NAMESPACE,
-                        "custom_categories": custom_categories
-                    }
-                ),
-                timeout=30.0
+
+        # Ensure project is on API version v2 (best-effort, no-op if already set)
+        try:
+            from mem0 import MemoryClient as _SyncClient
+            _ver_client = _SyncClient(api_key=config.MEM0_API_KEY)
+            try:
+                _ver_client.project.update(version="v2")
+            except Exception:
+                try:
+                    _ver_client.update_project(version="v2")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Compute an importance score and TTL policy
+        def _score_importance(text: str) -> tuple[str, float, int]:
+            t = text.lower()
+            # Heuristics: loyalty/preferences higher, transient context lower
+            high_markers = ["loyalty", "frequent flyer", "always", "never", "prefers", "preference"]
+            med_markers = ["hotel", "flight", "window seat", "aisle seat", "economy", "business", "direct flight"]
+            if any(m in t for m in high_markers):
+                return ("high", 0.9, 365)
+            if any(m in t for m in med_markers):
+                return ("medium", 0.6, 120)
+            return ("low", 0.3, 30)
+
+        importance, importance_score, ttl_days = _score_importance(enhanced_content)
+
+        # Deduplicate: if an identical memory exists, increment counters and return
+        try:
+            ac = AsyncMemoryClient(api_key=config.MEM0_API_KEY)
+            existing = await ac.search(
+                memory_content,
+                version="v2",
+                filters={"user_id": config.MEM0_NAMESPACE},
             )
-            
-            if response.status_code == 200:
-                logger.info("Successfully stored memory in mem0")
-                return f"Remembered: {memory_content}"
-            else:
-                logger.error(f"mem0 error: {response.status_code} - {response.text}")
-                return f"Memory not stored: mem0 error {response.status_code}"
-        
+            if existing:
+                # Simple exact-match check (normalized)
+                norm_new = memory_content.strip().lower().rstrip(". ")
+                for m in existing[:5]:
+                    if (m.get("memory") or "").strip().lower().rstrip(". ") == norm_new:
+                        try:
+                            from mem0 import MemoryClient
+                            def _bump():
+                                c = MemoryClient(api_key=config.MEM0_API_KEY)
+                                md = m.get("metadata") or {}
+                                acc = int(md.get("access_count", 0)) + 1
+                                md.update({
+                                    "access_count": acc,
+                                    "last_accessed": datetime.utcnow().isoformat() + "Z",
+                                })
+                                c.update(m.get("id"), metadata=md)
+                            await asyncio.to_thread(_bump)
+                        except Exception:
+                            pass
+                        return f"Remembered (updated existing): {memory_content}"
+        except Exception:
+            pass
+
+        # Add the memory and pass explicit categories to ensure assignment
+        try:
+            client = AsyncMemoryClient(api_key=config.MEM0_API_KEY)
+            result = await client.add(
+                [
+                    {"role": "user", "content": memory_content},
+                    {"role": "assistant", "content": enhanced_content},
+                ],
+                user_id=config.MEM0_NAMESPACE,
+                custom_categories=custom_categories_definitions,
+                metadata={
+                    "importance": importance,
+                    "importance_score": importance_score,
+                    "ttl_days": ttl_days,
+                },
+                output_format="v1.1",
+            )
+        except Exception as async_err:
+            logger.warning(
+                "Async mem0 add failed (will fallback to sync in thread): %s",
+                str(async_err),
+            )
+            from mem0 import MemoryClient
+
+            def _sync_add() -> Any:
+                sync_client = MemoryClient(api_key=config.MEM0_API_KEY)
+                return sync_client.add(
+                    [
+                        {"role": "user", "content": memory_content},
+                        {"role": "assistant", "content": enhanced_content},
+                    ],
+                    user_id=config.MEM0_NAMESPACE,
+                    custom_categories=custom_categories_definitions,
+                    metadata={
+                        "importance": importance,
+                        "importance_score": importance_score,
+                        "ttl_days": ttl_days,
+                    },
+                    output_format="v1.1",
+                )
+
+            result = await asyncio.to_thread(_sync_add)
+
+        logger.info("Successfully stored memory in mem0")
+        return f"Remembered: {memory_content}"
+
     except asyncio.TimeoutError:
         logger.error("mem0 timeout")
         return f"Memory not stored: mem0 timeout"
@@ -1478,53 +1677,145 @@ async def remember_tool(memory_content: str, context: str = "") -> str:
         return f"Memory not stored: {str(e)[:50]}"
 
 @tool
-async def recall_tool(query: str) -> str:
+async def recall_tool(query: str, top_k: int = 6) -> str:
     """
-    Recall memories using mem0's semantic search and associative understanding.
-    
-    Args:
-        query: Natural language query to find related memories
+    Anchor-aware async recall with parallel searches and optional traversal.
+
+    - Uses AsyncMemoryClient (same client family as remember) for all searches.
+    - Fans out queries using anchors derived from the prompt, plus a soft hint
+      from the latest user texts.
+    - Merges and de-duplicates results; returns up to `top_k`.
     """
     if not config.MEM0_API_KEY:
         return "No memories available: mem0 not configured"
-    
+
     try:
-        import httpx
-        
         logger.info(f"Searching memories for: {query}")
-        
-        # Let mem0 handle all the semantic understanding and relationship discovery
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await asyncio.wait_for(
-                client.post(
-                    "http://127.0.0.1:8001/mem0/search",
-                    json={
-                        "query": query,
-                        "user_id": config.MEM0_NAMESPACE
-                    }
-                ),
-                timeout=30.0
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                memories = result.get("result", [])
-                
-                if memories and len(memories) > 0:
-                    memory_contents = [memory.get('memory', '') for memory in memories[:3]]
-                    return f"Found {len(memory_contents)} related memories: " + "; ".join(memory_contents)
-                else:
-                    return f"No memories found related to: {query}"
-            else:
-                logger.error(f"mem0 error: {response.status_code}")
-                return f"No memories found: mem0 error {response.status_code}"
-            
+        client = AsyncMemoryClient(api_key=config.MEM0_API_KEY)
+
+        # Soft hint from recent user texts
+        hints = None
+        try:
+            if LAST_USER_TEXTS:
+                hints = " ".join(list(LAST_USER_TEXTS)[-2:])[:180]
+        except Exception:
+            pass
+
+        # Derive anchors (no fixed vocab; structural heuristics)
+        import re as _re
+        anchors: List[str] = []
+        for code in _re.findall(r"\b[A-Z]{2,4}\b", query):
+            if code not in anchors:
+                anchors.append(code)
+        for phrase in _re.findall(r"\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b", query):
+            if phrase.upper() in {"BOOK","FLIGHT","FROM","TO","PLEASE","HI","HELLO"}:
+                continue
+            if phrase not in anchors:
+                anchors.append(phrase)
+        for a, b in _re.findall(r'"([^\"]{3,})"|\'([^\']{3,})\'', query):
+            val = a or b
+            if val and val not in anchors:
+                anchors.append(val)
+        try:
+            stop = {"book","flight","from","to","please","hi","hello","me","the","and","for","in","on","of"}
+            words = [w for w in _re.findall(r"[A-Za-z]{4,}", query.lower()) if w not in stop]
+            for w in words:
+                if len(anchors) >= 6:
+                    break
+                if w not in anchors:
+                    anchors.append(w)
+        except Exception:
+            pass
+
+        # Compose search texts
+        base = f"{query} — {hints}" if hints and hints != query else query
+        search_texts: List[str] = [base]
+        for a in anchors[:4]:
+            search_texts.append(f"{a} preferences")
+            search_texts.append(str(a))
+
+        async def _do_search(text: str):
+            # Mirror list_memories_tool: always use sync client in a background thread
+            try:
+                from mem0 import MemoryClient as _SyncClient
+                def _sync() -> Any:
+                    c = _SyncClient(api_key=config.MEM0_API_KEY)
+                    return c.search(text, version="v2", filters={"user_id": config.MEM0_NAMESPACE}) or []
+                return await asyncio.to_thread(_sync)
+            except Exception as e2:
+                logger.warning(f"mem0 sync search failed for '{text[:50]}...': {e2}")
+                return []
+
+        slices = await asyncio.gather(*[_do_search(s) for s in search_texts])
+
+        # Merge and dedupe
+        merged: Dict[str, Dict] = {}
+        for sl in slices:
+            for m in sl or []:
+                mid = m.get('id')
+                if not mid:
+                    continue
+                if mid not in merged:
+                    merged[mid] = m
+
+        # Optional traversal from top anchors
+        traversal_texts: List[str] = []
+        for a in anchors[:2]:
+            try:
+                tr_raw = await traverse_memory_graph_tool.ainvoke({"start_entity": a, "depth": 1})
+                tr = json.loads(tr_raw)
+                for txt in (tr.get("direct_memories", []) or [])[:3]:
+                    if isinstance(txt, str) and txt:
+                        traversal_texts.append(txt)
+            except Exception:
+                continue
+
+        memories = list(merged.values())
+        k = max(1, min(int(top_k), 20))
+        if memories or traversal_texts:
+            # Refresh-on-access (sync client in thread; low volume)
+            try:
+                from mem0 import MemoryClient
+                def _refresh(mem_slice):
+                    c = MemoryClient(api_key=config.MEM0_API_KEY)
+                    for m in mem_slice:
+                        mid = m.get('id')
+                        if not mid:
+                            continue
+                        md = m.get('metadata') or {}
+                        acc = int(md.get('access_count', 0)) + 1
+                        md['access_count'] = acc
+                        md['last_accessed'] = datetime.utcnow().isoformat() + 'Z'
+                        if acc >= 3 and md.get('importance') == 'low':
+                            md['importance'] = 'medium'
+                            md['importance_score'] = max(float(md.get('importance_score', 0.3)), 0.6)
+                            md['ttl_days'] = max(int(md.get('ttl_days', 30)), 120)
+                        c.update(mid, metadata=md)
+                await asyncio.to_thread(_refresh, memories[:k])
+            except Exception:
+                pass
+
+            ordered: List[str] = []
+            seen = set()
+            for s in ([m.get('memory', '') for m in memories] + traversal_texts):
+                if not s or not isinstance(s, str):
+                    continue
+                key = s.strip()
+                if key in seen:
+                    continue
+                seen.add(key)
+                ordered.append(key)
+            return "Related memories: " + "; ".join(ordered[:k])
+        else:
+            return f"No memories found related to: {query}"
+
     except asyncio.TimeoutError:
         logger.error("mem0 timeout")
-        return f"No memories found: mem0 timeout"
+        return "No memories found related to your request."
     except Exception as e:
         logger.error(f"mem0 failed: {e}")
-        return f"No memories found: {str(e)[:50]}"
+        # Do not surface runtime guard or low-level transport strings to the user
+        return "No memories found related to your request."
 
 
 
@@ -1576,7 +1867,6 @@ async def extract_entities_tool(text: str) -> str:
             'text': text,
             'message': f'Extracted {sum(len(v) for v in found_entities.values())} entities from text'
         })
-        
     except Exception as e:
         logger.error(f"Error extracting entities: {e}")
         return json.dumps({
@@ -1588,92 +1878,84 @@ async def extract_entities_tool(text: str) -> str:
 async def traverse_memory_graph_tool(start_entity: str, depth: int = 2) -> str:
     """
     Traverse the memory graph starting from a specific entity.
-    
-    Performs knowledge graph traversal by finding memories related to the start entity,
-    then finding related memories to those, creating a network of associations.
-    
+
+    What it does:
+    - Finds direct memories related to `start_entity` (e.g., "Paris").
+    - Extracts related terms from those memories.
+    - If `depth > 1`, searches those related terms to surface indirect associations.
+
+    When to use:
+    - After calling `recall_tool` if results are thin or ambiguous, and you need connected context.
+    - When the user mentions a strong anchor entity (city/airline) and richer associations could improve recommendations.
+
+    Guidance:
+    - Prefer `depth=1` for speed; use `depth=2` only when the query is complex and the extra context is valuable.
+    - Do not dump raw memories verbatim to the user. Use the associations to personalize and justify suggestions naturally.
+
     Args:
-        start_entity: The entity to start traversal from (e.g., "Paris", "American Airlines")
-        depth: How many levels deep to traverse (default: 2)
-        
+        start_entity: The entity to start traversal from (e.g., "Paris", "American Airlines").
+        depth: How many levels deep to traverse (default: 2).
+
     Returns:
-        JSON string with traversal results and discovered relationships
+        JSON string with traversal results and discovered relationships.
     """
     try:
-        import httpx
-        
         logger.info(f"Traversing memory graph from '{start_entity}' with depth {depth}")
         
-        # First, search for memories related to the start entity
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await asyncio.wait_for(
-                client.post(
-                    "http://127.0.0.1:8001/mem0/search",
-                    json={
-                        "query": start_entity,
-                        "user_id": config.MEM0_NAMESPACE
-                    }
-                ),
-                timeout=30.0
+        # Use sync client in a background thread for traversal searches to avoid event-loop blocking
+        from mem0 import MemoryClient
+        def _sync_search_start() -> Any:
+            sync_client = MemoryClient(api_key=config.MEM0_API_KEY)
+            return sync_client.search(
+                start_entity,
+                version="v2",
+                filters={"user_id": config.MEM0_NAMESPACE},
             )
-            
-            if response.status_code == 200:
-                result = response.json()
-                direct_memories = result.get("result", [])
-                
-                # Extract related terms from direct memories
-                related_terms = []
-                for memory in direct_memories:
-                    content = memory.get('memory', '').lower()
-                    # Find other entities mentioned in these memories
-                    for term in content.split():
-                        if len(term) > 3 and term not in [start_entity.lower(), 'user', 'prefers', 'likes', 'travel']:
-                            related_terms.append(term)
-                
-                # If depth > 1, search for memories related to the related terms
-                indirect_memories = []
-                if depth > 1 and related_terms:
-                    # Take top related terms and search for them
-                    top_terms = list(set(related_terms))[:3]  # Limit to 3 terms
-                    
-                    for term in top_terms:
-                        try:
-                            term_response = await asyncio.wait_for(
-                                client.post(
-                                    "http://127.0.0.1:8001/mem0/search",
-                                    json={
-                                        "query": term,
-                                        "user_id": config.MEM0_NAMESPACE
-                                    }
-                                ),
-                                timeout=30.0
-                            )
-                            
-                            if term_response.status_code == 200:
-                                term_result = term_response.json()
-                                term_memories = term_result.get("result", [])
-                                indirect_memories.extend(term_memories)
-                        except Exception as e:
-                            logger.warning(f"Error searching for term '{term}': {e}")
-                            continue
-                
-                # Format results
-                traversal_result = {
-                    'start_entity': start_entity,
-                    'depth': depth,
-                    'direct_memories': [m.get('memory', '') for m in direct_memories],
-                    'related_terms': list(set(related_terms)),
-                    'indirect_memories': [m.get('memory', '') for m in indirect_memories],
-                    'total_memories_found': len(direct_memories) + len(indirect_memories),
-                    'message': f'Traversed memory graph from "{start_entity}" - found {len(direct_memories)} direct and {len(indirect_memories)} indirect memories'
-                }
-                
-                return json.dumps(traversal_result, indent=2)
-            else:
-                return json.dumps({
-                    'error': f'mem0 error {response.status_code}',
-                    'start_entity': start_entity
-                })
+        direct_memories = await asyncio.to_thread(_sync_search_start)
+        direct_memories = direct_memories or []
+        
+        # Extract related terms from direct memories
+        related_terms = []
+        for memory in direct_memories:
+            content = memory.get('memory', '').lower()
+            # Find other entities mentioned in these memories
+            for term in content.split():
+                if len(term) > 3 and term not in [start_entity.lower(), 'user', 'prefers', 'likes', 'travel']:
+                    related_terms.append(term)
+        
+        # If depth > 1, search for memories related to the related terms
+        indirect_memories = []
+        if depth > 1 and related_terms:
+            # Take top related terms and search for them
+            top_terms = list(set(related_terms))[:3]  # Limit to 3 terms
+            for term in top_terms:
+                try:
+                    def _sync_search_term() -> Any:
+                        sc = MemoryClient(api_key=config.MEM0_API_KEY)
+                        return sc.search(
+                            term,
+                            version="v2",
+                            filters={"user_id": config.MEM0_NAMESPACE},
+                        )
+                    term_memories = await asyncio.to_thread(_sync_search_term)
+                    if term_memories:
+                        indirect_memories.extend(term_memories)
+                except Exception as e2:
+                    logger.warning(f"Traversal term search failed for '{term}': {e2}")
+                    continue
+        
+        # Format results
+        traversal_result = {
+            'start_entity': start_entity,
+            'depth': depth,
+            'direct_memories': [m.get('memory', '') for m in direct_memories],
+            'related_terms': list(set(related_terms)),
+            'indirect_memories': [m.get('memory', '') for m in indirect_memories],
+            'total_memories_found': len(direct_memories) + len(indirect_memories),
+            'message': f'Traversed memory graph from "{start_entity}" - found {len(direct_memories)} direct and {len(indirect_memories)} indirect memories'
+        }
+        
+        return json.dumps(traversal_result, indent=2)
                 
     except Exception as e:
         logger.error(f"Error traversing memory graph: {e}")
@@ -1683,45 +1965,198 @@ async def traverse_memory_graph_tool(start_entity: str, depth: int = 2) -> str:
         })
 
 @tool
+async def pin_memory_tool(memory_id: str) -> str:
+    """Pin a memory (prevent expiry) by setting metadata.pinned=true."""
+    if not config.MEM0_API_KEY:
+        return "Cannot pin: mem0 not configured"
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _pin() -> dict:
+            c = MemoryClient(api_key=config.MEM0_API_KEY)
+            return c.update(memory_id, metadata={"pinned": True})
+        res = await _asyncio.to_thread(_pin)
+        return json.dumps({"status": "pinned", "id": memory_id, "response": res})
+    except Exception as e:
+        return json.dumps({"error": f"Pin failed: {str(e)[:200]}", "id": memory_id})
+
+@tool
+async def unpin_memory_tool(memory_id: str) -> str:
+    """Unpin a memory by setting metadata.pinned=false."""
+    if not config.MEM0_API_KEY:
+        return "Cannot unpin: mem0 not configured"
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _unpin() -> dict:
+            c = MemoryClient(api_key=config.MEM0_API_KEY)
+            return c.update(memory_id, metadata={"pinned": False})
+        res = await _asyncio.to_thread(_unpin)
+        return json.dumps({"status": "unpinned", "id": memory_id, "response": res})
+    except Exception as e:
+        return json.dumps({"error": f"Unpin failed: {str(e)[:200]}", "id": memory_id})
+
+@tool
+async def update_memory_importance_tool(memory_id: str, importance: str = "medium", importance_score: float = 0.6, ttl_days: int = 120) -> str:
+    """Update a memory's importance and TTL metadata."""
+    if not config.MEM0_API_KEY:
+        return "Cannot update: mem0 not configured"
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _upd() -> dict:
+            c = MemoryClient(api_key=config.MEM0_API_KEY)
+            md = {
+                "importance": importance,
+                "importance_score": float(importance_score),
+                "ttl_days": int(ttl_days),
+            }
+            return c.update(memory_id, metadata=md)
+        res = await _asyncio.to_thread(_upd)
+        return json.dumps({"status": "updated", "id": memory_id, "response": res})
+    except Exception as e:
+        return json.dumps({"error": f"Update importance failed: {str(e)[:200]}", "id": memory_id})
+
+@tool
+async def prune_memories_tool(max_age_days: int = 180, min_importance: str = "low") -> str:
+    """Prune memories older than max_age_days and with importance below threshold (low < medium < high)."""
+    if not config.MEM0_API_KEY:
+        return "Cannot prune: mem0 not configured"
+    order = {"low": 0, "medium": 1, "high": 2}
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        from datetime import datetime, timezone
+        def _prune() -> dict:
+            c = MemoryClient(api_key=config.MEM0_API_KEY)
+            results = c.search("*", version="v2", filters={"user_id": config.MEM0_NAMESPACE}) or []
+            cutoff = datetime.now(timezone.utc).timestamp() - (max_age_days * 86400)
+            to_delete = []
+            for m in results:
+                md = m.get("metadata") or {}
+                imp = md.get("importance", "low").lower()
+                if order.get(imp, 0) < order.get(min_importance, 0):
+                    continue
+                # Use created_at timestamp
+                created = m.get("created_at")
+                try:
+                    ts = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp() if created else None
+                except Exception:
+                    ts = None
+                if ts is not None and ts < cutoff:
+                    to_delete.append(m.get("id"))
+            if to_delete:
+                c.batch_delete([i for i in to_delete if i])
+            return {"deleted": len(to_delete), "ids": to_delete[:50]}
+        res = await _asyncio.to_thread(_prune)
+        return json.dumps(res)
+    except Exception as e:
+        return json.dumps({"error": f"Prune failed: {str(e)[:200]}"})
+@tool
+async def delete_memory_tool(memory_id: str) -> str:
+    """Delete a single memory by its ID in mem0."""
+    if not config.MEM0_API_KEY:
+        return "Cannot delete: mem0 not configured"
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _do_delete() -> dict:
+            client = MemoryClient(api_key=config.MEM0_API_KEY)
+            return client.delete(memory_id)
+        resp = await _asyncio.to_thread(_do_delete)
+        return json.dumps({"status": "deleted", "id": memory_id, "response": resp})
+    except Exception as e:
+        return json.dumps({"error": f"Delete failed: {str(e)[:200]}", "id": memory_id})
+
+@tool
+async def delete_memories_by_query_tool(query: str, top_k: int = 10) -> str:
+    """Search for memories matching `query` (scoped to this namespace) and delete up to `top_k` results."""
+    if not config.MEM0_API_KEY:
+        return "Cannot delete: mem0 not configured"
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _do_search_and_delete() -> dict:
+            client = MemoryClient(api_key=config.MEM0_API_KEY)
+            results = client.search(query, version="v2", filters={"user_id": config.MEM0_NAMESPACE}) or []
+            ids = [r.get("id") for r in results[: max(1, min(int(top_k), 100))] if r.get("id")]
+            if not ids:
+                return {"deleted": 0, "ids": []}
+            resp = client.batch_delete([{"memory_id": i} for i in ids])
+            return {"deleted": len(ids), "ids": ids, "response": resp}
+        data = await _asyncio.to_thread(_do_search_and_delete)
+        return json.dumps(data)
+    except Exception as e:
+        return json.dumps({"error": f"Batch delete failed: {str(e)[:200]}"})
+
+@tool
+async def delete_all_namespace_memories_tool(confirm: bool = False) -> str:
+    """Delete ALL memories for the current namespace (irreversible). Pass confirm=True to proceed."""
+    if not config.MEM0_API_KEY:
+        return "Cannot delete: mem0 not configured"
+    if not confirm:
+        return "Refused: set confirm=True to delete all memories for this namespace"
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _wipe() -> dict:
+            client = MemoryClient(api_key=config.MEM0_API_KEY)
+            total = 0
+            while True:
+                results = client.search("*", version="v2", filters={"user_id": config.MEM0_NAMESPACE}) or []
+                ids = [r.get("id") for r in results[:100] if r.get("id")]
+                if not ids:
+                    break
+                client.batch_delete([{"memory_id": i} for i in ids])
+                total += len(ids)
+                if len(ids) < 100:
+                    break
+            return {"deleted_total": total}
+        res = await _asyncio.to_thread(_wipe)
+        return json.dumps(res)
+    except Exception as e:
+        return json.dumps({"error": f"Namespace wipe failed: {str(e)[:200]}"})
+
+@tool
 async def list_memories_tool() -> str:
     """List all memories stored in mem0."""
     if not config.MEM0_API_KEY:
         return "No memories available: mem0 not configured"
     
     try:
-        import httpx
-        
-        logger.info("Listing all memories from mem0")
-        
-        # Use a broad search to get most memories
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await asyncio.wait_for(
-                client.post(
-                    "http://127.0.0.1:8001/mem0/search",
-                    json={
-                        "query": "all memories",
-                        "user_id": config.MEM0_NAMESPACE
-                    }
-                ),
-                timeout=30.0
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                memories = result.get("result", [])
-                
-                if memories and len(memories) > 0:
-                    memory_list = []
-                    for i, memory in enumerate(memories[:10], 1):
-                        content = memory.get('memory', 'No content found')
-                        memory_list.append(f"{i}. {content}")
-                    
-                    return f"Found {len(memories)} memories:\n" + "\n".join(memory_list)
-                else:
-                    return "No memories found"
-            else:
-                return f"Error listing memories: mem0 error {response.status_code}"
-                
+        logger.info("Listing all memories from mem0 (sync in thread)")
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _sync_list() -> Any:
+            try:
+                c = MemoryClient(api_key=config.MEM0_API_KEY)
+                return c.search("*", version="v2", filters={"user_id": config.MEM0_NAMESPACE}) or []
+            except Exception:
+                return []
+        memories = await _asyncio.to_thread(_sync_list)
+        if memories:
+            memory_list = []
+            for i, memory in enumerate(memories[:10], 1):
+                content = memory.get('memory', 'No content found')
+                # Sanitize any runtime guard noise
+                if isinstance(content, str) and 'Blocking call to socket' in content:
+                    continue
+                md = memory.get('metadata') or {}
+                imp = md.get('importance')
+                ttl = md.get('ttl_days')
+                pin = md.get('pinned')
+                suffix = []
+                if imp:
+                    suffix.append(f"importance={imp}")
+                if ttl:
+                    suffix.append(f"ttl_days={ttl}")
+                if pin:
+                    suffix.append("pinned")
+                extra = f" ({', '.join(suffix)})" if suffix else ""
+                memory_list.append(f"{i}. {content}{extra}")
+            return f"Found {len(memories)} memories:\n" + "\n".join(memory_list)
+        else:
+            return "No memories found"
     except Exception as e:
         logger.error(f"Failed to list memories: {e}")
         return f"Error listing memories: {str(e)[:50]}"
@@ -1762,7 +2197,14 @@ def create_graph():
             recall_tool,
             extract_entities_tool,
             traverse_memory_graph_tool,
-            list_memories_tool
+            list_memories_tool,
+            delete_memory_tool,
+            delete_memories_by_query_tool,
+            delete_all_namespace_memories_tool,
+            pin_memory_tool,
+            unpin_memory_tool,
+            update_memory_importance_tool,
+            prune_memories_tool
         ]
         logger.debug(f"Initializing ToolNode with {len(tools)} tools: {[tool.name for tool in tools]}")
         tool_node = ToolNode(tools)
@@ -1813,7 +2255,7 @@ def create_graph():
 
     except Exception as e:
         logger.error(f"Error creating graph: {str(e)}", exc_info=True)
-        raise   
+        raise
 
 
 # Export the compiled graph
