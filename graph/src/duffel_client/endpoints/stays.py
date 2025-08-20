@@ -96,7 +96,8 @@ class StaysEndpoint:
         guests: list,
         email: str,
         stay_special_requests: str = "",
-        phone_number: str = ""
+        phone_number: str = "",
+        payment: dict = None
     ) -> dict:
         """Create a booking for a given quote."""
         endpoint = "/stays/bookings"
@@ -109,6 +110,10 @@ class StaysEndpoint:
                 "phone_number": phone_number,
             }
         }
+        logger.info(f"Payment in stays.py: {payment}")
+        if payment:            
+            data["data"]["payment"] = payment
+        logger.info(f"Data in stays.py before sending to api: {data}")
         return await self.client.post(endpoint, data=data)
     
     async def cancel_booking(self, booking_id: str) -> dict:
@@ -450,7 +455,8 @@ async def create_booking(
     guests: list,
     email: str,
     stay_special_requests: str = "",
-    phone_number: str = ""
+    phone_number: str = "",
+    payment: dict = None
 ) -> dict:
     """Convenience function to create a booking from a quote."""
     from ..client import get_client
@@ -458,7 +464,7 @@ async def create_booking(
     client = get_client()
     stays_endpoint = StaysEndpoint(client)
     return await stays_endpoint.create_booking(
-        quote_id, guests, email, stay_special_requests, phone_number
+        quote_id, guests, email, stay_special_requests, phone_number,payment
     )
 
 async def cancel_hotel_booking(booking_id: str) -> dict:

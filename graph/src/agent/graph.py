@@ -12,7 +12,7 @@ import httpx
 
 import dateparser
 import re
-
+ 
 # Try to load dotenv, but don't fail if it's not available (e.g., in production)
 try:
     from dotenv import load_dotenv
@@ -33,6 +33,8 @@ from langgraph.graph.ui import AnyUIMessage, ui_message_reducer, push_ui_message
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.errors import GraphInterrupt
+from langgraph.types import Command
+from typing import Literal
 
 # Import our Duffel client
 from src.duffel_client.endpoints.stays import search_hotels, fetch_hotel_rates, create_quote, create_booking, cancel_hotel_booking, update_hotel_booking
@@ -47,6 +49,14 @@ from src.duffel_client.endpoints.flights import (
 
 from src.duffel_client.endpoints.flights import create_order_cancellation, confirm_order_cancellation
 
+from src.duffel_client.endpoints.payments import (
+    build_card_payment,
+    create_multi_use_card,
+    create_single_use_from_multi_use,
+    pay_later_for_order,
+    create_balance_payment
+)
+
 # Configure logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -54,6 +64,8 @@ logging.basicConfig(level=logging.INFO)
 TOOL_UI_MAPPING = {
     "search_hotels_tool": "hotelResults",
     "search_flights_tool": "flightResults",
+    "flight_payment_sequence_tool": "paymentForm",
+    "hotel_payment_sequence_tool": "paymentForm"
 }
 
 # Log UI-related imports and configurations
@@ -70,6 +82,8 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]  
     ui: Annotated[Sequence[AnyUIMessage], ui_message_reducer]
     ui_enabled: Optional[bool]
+    booking_intent: Optional[bool]
+    current_agent: Optional[str]    
 
 def parse_and_normalize_date(input_date: str) -> str:
     """
@@ -204,6 +218,210 @@ async def validate_phone_number_tool(phone: str) -> str:
         
     except NumberParseException as e:
         return f"Error: Invalid phone number: {e}"
+
+def is_live_duffel_token(token: str) -> bool:
+    """
+    Check if we're using a live Duffel API token.
+    Live tokens typically start with 'live_' while test tokens start with 'test_'.
+    """
+    if not token:
+        return False
+    return token.startswith('live_')
+## PAYMENTS ##
+
+@tool
+async def capture_payment_tool(
+    payment_type: str,
+    resource_id: str,
+    card_details: dict = None,
+    multi_use_card_id: str = None,
+    cvc: str = None,
+    expiry_month: str = None,
+    expiry_year: str = None,
+    balance_amount: str = None,
+    balance_currency: str = None,
+    services: list = None
+) -> str:
+    """
+    Capture payment information and create payment object for booking.
+    
+    This tool handles the complete payment flow:
+    1. For balance payments: Creates balance payment object
+    2. For new cards: Tokenizes card and creates 3DS session (live mode) OR uses balance (test mode)
+    3. For multi-use cards: Creates single-use card and 3DS session (live mode) OR uses balance (test mode)
+    
+    IMPORTANT: In test mode (test_* tokens), card payments are automatically converted to balance payments
+    for demonstration purposes. In live mode (live_* tokens), actual card processing occurs.
+    
+    Args:
+        payment_type: "balance", "card", or "multi_use_card"
+        resource_id: offer_id (flights), quote_id (hotels), or order_id (pay later)
+        card_details: Full card information for new cards
+        multi_use_card_id: Existing multi-use card ID
+        cvc: CVC for multi-use card derived payment
+        expiry_month: Expiry month for multi-use card derived payment
+        expiry_year: Expiry year for multi-use card derived payment
+        balance_amount: Amount for balance payment
+        balance_currency: Currency for balance payment
+        services: Optional services for 3DS session
+    
+    Returns:
+        JSON string with payment object ready for booking
+    """
+    logger.info(f"Payment capture initiated - type: {payment_type}, resource: {resource_id}")
+    
+    if not config.DUFFEL_API_TOKEN:
+        logger.error("Duffel API token not configured")
+        return "Payment capture is currently unavailable. Please configure the Duffel API token."
+    
+    # Check if we're in live mode
+    is_live = is_live_duffel_token(config.DUFFEL_API_TOKEN)
+    logger.info(f"Payment mode: {'LIVE' if is_live else 'TEST'}")
+    
+    try:
+        if payment_type == "balance":
+            if not balance_amount or not balance_currency:
+                return "Error: balance_amount and balance_currency are required for balance payments"
+            
+            payment = await create_balance_payment(balance_amount, balance_currency)
+            logger.info("Balance payment created successfully")
+            
+        elif payment_type == "card":
+            if not card_details:
+                return "Error: card_details are required for new card payments"
+            
+            if is_live:
+                # Live mode: Use actual card payment flow
+                logger.info("LIVE MODE: Processing actual card payment")
+                payment = await build_card_payment(
+                    card_details, 
+                    resource_id, 
+                    config.DUFFEL_API_TOKEN,
+                    multi_use=False
+                )
+                logger.info("Card payment created successfully in live mode")
+            else:
+                # Test mode: Convert to balance payment for demonstration
+                logger.info("TEST MODE: Converting card payment to balance payment for demonstration")
+                
+                # Extract amount from card_details if available, otherwise use default
+                amount = card_details.get("amount", "100.00")
+                currency = card_details.get("currency", "USD")
+                
+                # Create balance payment instead
+                payment = await create_balance_payment(amount, currency)
+                logger.info(f"TEST MODE: Created balance payment of {amount} {currency} instead of card payment")
+                
+                # Add a note about the conversion
+                payment["_test_mode_note"] = "Card payment converted to balance payment for test environment"
+            
+        elif payment_type == "multi_use_card":
+            if not multi_use_card_id or not cvc or not expiry_month or not expiry_year:
+                return "Error: multi_use_card_id, cvc, expiry_month, and expiry_year are required for multi-use card payments"
+            
+            if is_live:
+                # Live mode: Use actual multi-use card flow
+                logger.info("LIVE MODE: Processing actual multi-use card payment")
+                
+                # Create single-use card from multi-use
+                card_resp = await create_single_use_from_multi_use(
+                    multi_use_card_id, cvc, expiry_month, expiry_year, config.DUFFEL_API_TOKEN
+                )
+                card_id = card_resp["data"]["id"]
+                
+                # Create 3DS session
+                from src.duffel_client.endpoints.payments import create_3ds_session
+                three_ds_resp = await create_3ds_session(
+                    card_id, resource_id, config.DUFFEL_API_TOKEN, services
+                )
+                three_ds_id = three_ds_resp["data"]["id"]
+                
+                payment = {
+                    "type": "card",
+                    "card_id": card_id,
+                    "three_d_secure_session_id": three_ds_id
+                }
+                logger.info("Multi-use card payment created successfully in live mode")
+            else:
+                # Test mode: Convert to balance payment for demonstration
+                logger.info("TEST MODE: Converting multi-use card payment to balance payment for demonstration")
+                
+                # Use default amount/currency for test
+                payment = await create_balance_payment("100.00", "USD")
+                logger.info("TEST MODE: Created balance payment instead of multi-use card payment")
+                
+                # Add a note about the conversion
+                payment["_test_mode_note"] = "Multi-use card payment converted to balance payment for test environment"
+            
+        else:
+            return f"Error: Invalid payment_type '{payment_type}'. Must be 'balance', 'card', or 'multi_use_card'"
+        
+        return json.dumps({"payment": payment, "status": "success", "mode": "live" if is_live else "test"})
+        
+    except Exception as e:
+        logger.error(f"Payment capture failed: {str(e)}", exc_info=True)
+        return f"Payment capture error: {str(e)}"
+
+@tool
+async def create_multi_use_card_tool(card_details: dict) -> str:
+    """
+    Create a multi-use card for future payments.
+    
+    Args:
+        card_details: Card information (CVC will not be stored)
+    
+    Returns:
+        JSON string with multi-use card details
+    """
+    logger.info("Creating multi-use card")
+    
+    if not config.DUFFEL_API_TOKEN:
+        logger.error("Duffel API token not configured")
+        return "Multi-use card creation is currently unavailable. Please configure the Duffel API token."
+    
+    try:
+        # Remove CVC from card details for multi-use cards
+        if "cvc" in card_details:
+            card_details = card_details.copy()
+            del card_details["cvc"]
+        
+        response = await create_multi_use_card(card_details, config.DUFFEL_API_TOKEN)
+        logger.info("Multi-use card created successfully")
+        return json.dumps(response)
+        
+    except Exception as e:
+        logger.error(f"Multi-use card creation failed: {str(e)}", exc_info=True)
+        return f"Multi-use card creation error: {str(e)}"
+
+@tool
+async def pay_later_tool(order_id: str, payment: dict) -> str:
+    """
+    Pay for a hold order later.
+    
+    Args:
+        order_id: The hold order ID
+        payment: Payment object (from capture_payment_tool)
+    
+    Returns:
+        JSON string with payment confirmation
+    """
+    logger.info(f"Processing pay later for order: {order_id}")
+    
+    if not config.DUFFEL_API_TOKEN:
+        logger.error("Duffel API token not configured")
+        return "Pay later is currently unavailable. Please configure the Duffel API token."
+    
+    try:
+        response = await pay_later_for_order(order_id, payment, config.DUFFEL_API_TOKEN)
+        logger.info("Pay later processed successfully")
+        return json.dumps(response)
+        
+    except Exception as e:
+        logger.error(f"Pay later failed: {str(e)}", exc_info=True)
+        return f"Pay later error: {str(e)}"
+    
+## PAYMENTS ##
+
 
 
 @tool
@@ -418,7 +636,7 @@ async def fetch_hotel_rates_tool(search_result_id: str) -> str:
         return f"Unexpected error during rate fetch: {str(e)}"
 
 @tool
-async def create_quote_tool(rate_id: str) -> str:
+async def create_hotel_quote_tool(rate_id: str) -> str:
     """Create a Duffel stay quote for a given rate.
 
     Args:
@@ -463,10 +681,11 @@ async def create_quote_tool(rate_id: str) -> str:
         return f"Unexpected error during quote creation: {exc}"
 
 @tool
-async def create_booking_tool(
+async def create_hotel_booking_tool(
     quote_id: str,
     guests: list,
     email: str,
+    payments: list = None,
     stay_special_requests: str = "",
     phone_number: str = ""
 ) -> str:
@@ -476,6 +695,7 @@ async def create_booking_tool(
         quote_id: The quote ID (quo_...)
         guests: List of guest dicts (given_name, family_name, born_on)
         email: Contact email
+        payments: List of payment objects (from capture_payment_tool)
         stay_special_requests: (optional) Special requests
         phone_number: (optional) Contact number
     Returns:
@@ -491,8 +711,22 @@ async def create_booking_tool(
         return "Booking creation is currently unavailable. Please configure the Duffel API token."
 
     try:
+        # Handle payment tokenization if raw card data is provided
+        if payments and isinstance(payments, list) and len(payments) > 0:
+            payment = payments[0]
+            if isinstance(payment, dict) and payment.get("number") and not payment.get("card_id"):
+                try:
+                    # Tokenize raw card
+                    tokenized_payment = await build_card_payment(
+                        payment, quote_id, config.DUFFEL_API_TOKEN
+                    )
+                    payments = [tokenized_payment]
+                    logger.info("Card tokenized successfully")
+                except Exception as tok_err:
+                    return f"Error tokenizing card: {tok_err}"
+
         response = await create_booking(
-            quote_id, guests, email, stay_special_requests, phone_number
+            quote_id, guests, email, stay_special_requests, phone_number, payments
         )
         logger.info("Booking created successfully")
         return json.dumps(response)
@@ -567,20 +801,14 @@ async def create_flight_booking_tool(
 ) -> str:
     """
     Book a flight using a Duffel offer.
-    Example:
-        payments = [{
-            "type": "balance",
-            "amount": "1041.41",
-            "currency": "AUD"
-        }]
+
     Args:
         offer_id: The offer ID (off_...)
-        passengers: List of passenger dicts. Each passenger MUST have:
-                   - id (Duffel-generated, from offer)
-                   - given_name, family_name, born_on, email, phone_number, etc.
-        payments: List of payment dicts (see Duffel API)
+        passengers: List of passenger dicts.
+        payments: List of payment dicts.
+
     Returns:
-        JSON string of the booking/order response, or an error message.
+        JSON string of the booking/order response or error message.
     """
     logger.info(f"Booking creation initiated for offer_id: {offer_id}")
 
@@ -596,6 +824,19 @@ async def create_flight_booking_tool(
         if "id" not in p or not p["id"]:
             return f"Error: Passenger {i+1} is missing a Duffel-generated 'id'."
 
+    # ---------- Tokenise raw card if needed ----------
+    if payments and isinstance(payments[0], dict) and payments[0].get("number") and not payments[0].get("card_id"):
+        try:
+            payments = [
+                await build_card_payment(
+                    payments[0],        # raw card dict
+                    offer_id,           # resource the card will pay for
+                    config.DUFFEL_API_TOKEN,
+                )
+            ]
+        except Exception as tok_err:
+            return f"Error tokenising card: {tok_err}"
+    
     try:
         response = await create_flight_booking(offer_id, passengers, payments)
         logger.info("Booking created successfully")
@@ -650,6 +891,317 @@ async def get_seat_maps_tool(offer_id: str) -> str:
         return f"Seat map fetch error: {title} {detail}"
     except Exception as e:
         return f"Error fetching seat maps: {str(e)}"
+
+@tool
+async def flight_payment_sequence_tool(
+    offer_id: str,
+    passengers: list,
+    email: str,
+    payment_method: Dict[str, Any]=None,
+    phone_number: str = "",
+    include_seat_map: bool = False,
+    **kwargs
+) -> str:
+    """
+    Complete FLIGHT booking payment sequence.
+    Use this tool ONLY for FLIGHT bookings.
+    
+    IMPORTANT: Before calling this tool, collect ALL required information:
+    - Passenger details (name, birth date, email, phone)
+    - Payment method (card details, balance, etc.) 
+    - Seat selection preference (yes/no)    
+    
+    Args:
+        offer_id: The flight offer ID (off_...)
+        passengers: List of passenger details (must include given_name,born_on and family_name)
+        email: Contact email
+        payment_method: Payment information (card details, balance, etc.)
+        phone_number: Contact phone number
+        include_seat_map: If True, retrieve seat map before booking
+    
+    Returns:
+        JSON string with booking confirmation or error
+    """
+    logger.info(f"Flight payment sequence initiated for offer: {offer_id}")
+    quote_data = await fetch_flight_offer(offer_id)
+    logger.info(quote_data)
+    amount = quote_data.get("data", {}).get("total_amount")
+    currency = quote_data.get("data", {}).get("total_currency")
+    if not passengers or not all(['given_name' in g and 'family_name' in g and 'born_on' in g for g in passengers]):
+        return json.dumps({
+            "status": "need_guest_info",
+            "message": "Please provide complete guest details (given_name and family_name)"
+        })
+    
+    # Step 1: Get seat map if requested
+    if include_seat_map and not kwargs.get("selected_seats"):
+        logger.info("Step 1: Retrieving seat map")
+        try:
+            seat_maps = await get_seat_maps(offer_id)
+            return json.dumps({
+            "status": "seat_map_retrieved",
+            "message": "Seat map retrieved. Please choose seats by their service_id and call again with 'selected_seats'.",
+            "seat_map": seat_maps,
+            "metadata": {
+                "offer_id": offer_id,
+                "passengers": passengers,
+                "email": email,
+                "phone_number": phone_number,
+                "payment_method": payment_method
+                }
+            })
+        except Exception as e:
+            return json.dumps({"error": f"Seat map retrieval failed: {str(e)}"})
+    
+    # STEP 2 — Ask for payment if not provided
+    if not payment_method:        
+
+        return json.dumps({
+            "ui_type": "paymentForm",
+            "data": {
+                "title": "Complete Payment",
+                "amount": amount,
+                "currency": currency,
+                "fields": [
+                    {
+                        "name": "cardNumber",
+                        "label": "Card Number",
+                        "type": "text",
+                        "required": True
+                    },
+                    {
+                        "name": "expiryDate",
+                        "label": "Expiry Date",
+                        "type": "text",
+                        "required": True
+                    },
+                    {
+                        "name": "cvc",
+                        "label": "CVC",
+                        "type": "text", 
+                        "required": True
+                    },
+                    {
+                        "name": "name",
+                        "label": "Cardholder Name",
+                        "type": "text",
+                        "required": True
+                    }
+                ]
+            },
+            "metadata": {
+                "guests": passengers,
+                "email": email,
+                "phone_number": phone_number,
+                "offer_id": offer_id
+            }
+        })
+    
+    # STEP 3 — Process payment
+    is_live = is_live_duffel_token(config.DUFFEL_API_TOKEN)
+    logger.info(f"Flight payment sequence mode: {'LIVE' if is_live else 'TEST'}")
+        
+    logger.info("Step 2: Processing payment")
+    if not is_live:
+        logger.info("TEST MODE: Converting all payments to balance")
+        payments = [await create_balance_payment(amount, currency)]
+    else:
+        if payment_method.get("type") == "balance":
+            # Balance payment - use directly                
+            payments = [await create_balance_payment(amount, currency)]
+        else: 
+            # Card payment - handle based on mode
+            payment = await build_card_payment(
+                    payment_method, offer_id, config.DUFFEL_API_TOKEN
+                )
+            payments = [payment]
+            logger.info(f"Live card: {payments}")             
+    
+    # STEP 4 — Build services list if selected seats provided
+    services = []
+    if kwargs.get("selected_seats"):
+        logger.info(f"Adding {len(kwargs['selected_seats'])} selected seats to services list")
+        for seat in kwargs["selected_seats"]:
+            services.append({"id": seat["service_id"], "quantity": 1})
+
+    logger.info("Step 3: Creating booking")
+
+    # Ensure email and phone number are inside passengers
+    for passenger in passengers:
+        if "email" not in passenger:
+            passenger["email"] = email
+        if "phone_number" not in passenger:
+            passenger["phone_number"] = phone_number
+
+    try:
+        # Direct function call instead of tool
+        booking_result = await create_flight_booking(offer_id, passengers, payments,services=services if services else None)
+        logger.info("Flight payment sequence completed successfully")
+        
+        # Add mode information to response
+        if isinstance(booking_result, dict):
+            booking_result["_payment_mode"] = "live" if is_live else "test"
+        
+        return json.dumps(booking_result)
+    except Exception as e:
+        return json.dumps({"error": f"Booking creation failed: {str(e)}"})
+
+@tool
+async def hotel_payment_sequence_tool(
+    rate_id: str,
+    guests: list,
+    email: str,
+    payment_method: Dict[str, Any]=None,
+    phone_number: str = "",
+    stay_special_requests: str = "",
+    **kwargs
+) -> str:
+    """
+    Complete HOTEL booking payment sequence.
+    Use this tool ONLY for HOTEL bookings.
+    
+    IMPORTANT: Before calling this tool, collect ALL required information:
+    - Guest details (name, email, phone)
+    - Payment method (card details, balance, etc.)
+    
+    Args:
+        rate_id: The hotel rate ID (rat_...)
+        guests: List of guest details (must include given_name and family_name)
+        email: Contact email
+        payment_method: Payment information (card details, balance, etc.)
+        phone_number: Contact phone number
+        stay_special_requests: Special requests for the stay
+    
+    Returns:
+        JSON string with booking confirmation or error
+    """
+    logger.info(f"Hotel payment sequence initiated for rate: {rate_id}")
+    logger.debug(f"[PAYMENT FLOW] Payment method received: {json.dumps(payment_method, indent=2)}")
+    quote_data = await create_quote(rate_id)
+
+    
+    # Validate required fields
+    if not guests or not all(['given_name' in g and 'family_name' in g for g in guests]):
+        return json.dumps({
+            "status": "need_guest_info",
+            "message": "Please provide complete guest details (given_name and family_name)"
+        })
+    
+    if not payment_method:
+        # Get price info first to show in payment form
+        try:
+            
+            amount = quote_data.get("data", {}).get("total_amount")
+            currency = quote_data.get("data", {}).get("total_currency")
+        except Exception as e:
+            logger.error(f"Failed to get quote: {str(e)}")
+            amount = "0.00"
+            currency = "AUD"
+        return json.dumps({
+            "ui_type": "paymentForm",
+            "data": {
+                "title": "Complete Payment",
+                "amount": amount,
+                "currency": currency,
+                "fields": [
+                    {
+                        "name": "cardNumber",
+                        "label": "Card Number",
+                        "type": "text",
+                        "required": True
+                    },
+                    {
+                        "name": "expiryDate",
+                        "label": "Expiry Date",
+                        "type": "text",
+                        "required": True
+                    },
+                    {
+                        "name": "cvc",
+                        "label": "CVC",
+                        "type": "text", 
+                        "required": True
+                    },
+                    {
+                        "name": "name",
+                        "label": "Cardholder Name",
+                        "type": "text",
+                        "required": True
+                    }
+                ]
+            },
+            "metadata": {
+                "guests": guests,
+                "email": email,
+                "phone_number": phone_number,
+                "stay_special_requests": stay_special_requests               
+            }
+        })
+    # Check if we're in live mode
+    is_live = is_live_duffel_token(config.DUFFEL_API_TOKEN)
+    logger.info(f"Test mode confirmation - is_live: {is_live}, token prefix: {config.DUFFEL_API_TOKEN[:6]}...")
+    logger.info(f"Hotel payment sequence mode: {'LIVE' if is_live else 'TEST'}")
+    
+    try:
+        # Step 1: Create quote
+        logger.info("Step 1: Creating quote")
+        # quote_data = await create_quote(rate_id)
+        
+        if "error" in quote_data:
+            if "rate_unavailable" in quote_data["error"]:
+                return json.dumps({
+                    "status": "rate_expired",
+                    "message": "This rate is no longer available. Please search again for fresh rates."
+                })
+            return json.dumps({"error": f"Quote creation failed: {quote_data['error']}"})
+        
+        quote_id = quote_data.get("data", {}).get("id") or quote_data.get("quote_id")
+        if not quote_id:
+            return json.dumps({"error": "Could not extract quote ID from response"})
+        
+        # Step 2: Process payment - FORCE BALANCE IN TEST MODE
+        logger.info("Step 2: Processing payment")
+        if not is_live:
+            logger.info("TEST MODE: Converting all payments to balance")
+            payments = []
+        else:
+            # LIVE MODE - process actual card payment
+            if payment_method.get("type") == "balance":
+                payments = [payment_method]
+                logger.info(f"Live balance: {payments}")
+            else:
+                try:
+                    payment = await build_card_payment(
+                        payment_method, quote_id, config.DUFFEL_API_TOKEN
+                    )
+                    payments = [payment]
+                    logger.info(f"Live card: {payments}")
+                except Exception as e:
+                    return json.dumps({"error": f"Payment processing failed: {str(e)}"})
+        
+        # Step 3: Create booking
+        logger.info("Step 3: Creating booking")
+        logger.info(f"Payment: {payments}")
+        booking_result = await create_booking(
+            quote_id=quote_id,
+            guests=guests,
+            email=email,
+            stay_special_requests=stay_special_requests,
+            phone_number=phone_number,
+            payment=payments[0] if payments else None
+        )
+        
+        logger.info("Hotel payment sequence completed successfully")
+        
+        # Add mode information to response
+        if isinstance(booking_result, dict):
+            booking_result["_payment_mode"] = "live" if is_live else "test"
+        
+        return json.dumps(booking_result)
+        
+    except Exception as e:
+        logger.error(f"Hotel payment sequence failed: {str(e)}")
+        return json.dumps({"error": f"Booking sequence failed: {str(e)}"})
 
 @tool
 async def list_airline_initiated_changes_tool() -> str:
@@ -877,10 +1429,26 @@ def should_push_ui_message(tool_message: ToolMessage, tool_data: Dict[str, Any])
     Returns:
         tuple: (should_push, ui_type)
     """
+
+    if isinstance(tool_data, str):
+        try:
+            tool_data = json.loads(tool_data)
+        except json.JSONDecodeError:
+            # Special case: Check if it's a payment sequence tool with raw string
+            if tool_message.name in ["flight_payment_sequence_tool", "hotel_payment_sequence_tool"]:
+                return True, "paymentForm"
+            return False, None
+        
     tool_name = tool_message.name
     logger.info(f"[UI PUSH] Evaluating UI push for tool: {tool_name}")
     logger.debug(f"[UI PUSH] Tool data keys: {list(tool_data.keys()) if isinstance(tool_data, dict) else 'not dict'}")
     logger.debug(f"[UI PUSH] Tool data type: {type(tool_data)}")
+
+    # First check for explicit UI type in the tool data (highest priority)
+    if isinstance(tool_data, dict) and "ui_type" in tool_data:
+        ui_type = tool_data["ui_type"]
+        logger.info(f"[UI PUSH] Found explicit ui_type in data: {ui_type}")
+        return True, ui_type
     
     # Check if tool has UI mapping
     ui_type = TOOL_UI_MAPPING.get(tool_name)
@@ -889,6 +1457,15 @@ def should_push_ui_message(tool_message: ToolMessage, tool_data: Dict[str, Any])
         return False, None
     
     logger.info(f"[UI PUSH] Found UI mapping: {tool_name} -> {ui_type}")
+
+    # Payment sequence tools - highest priority
+    if tool_name in ["flight_payment_sequence_tool", "hotel_payment_sequence_tool"]:
+        logger.info(f"[UI PUSH] Processing payment sequence tool")
+        if isinstance(tool_data, dict):
+            # Explicit payment request status
+            if tool_data.get("status") == "need_payment_info":
+                logger.info(f"[UI PUSH] ✓ Payment form needed (explicit request)")
+                return True, "paymentForm"
     
     # Tool-specific logic
     if tool_name == "search_hotels_tool":
@@ -919,7 +1496,10 @@ def should_push_ui_message(tool_message: ToolMessage, tool_data: Dict[str, Any])
     
     elif tool_name == "search_flights_tool":
         logger.info(f"[UI PUSH] Flight search - using generic JSON renderer (no custom UI)")
-        # Don't push UI for flights - use generic JSON renderer
+        if isinstance(tool_data, dict) and tool_data.get("status") in ["need_payment_info"]:
+            logger.info(f"[UI PUSH] ✓ Payment form needed")
+            return True, ui_type
+        logger.info(f"[UI PUSH] ✗ No payment form needed")
         return False, None
     
     # For other tools, check if data is rich enough for UI
@@ -937,6 +1517,7 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
     """Main agent reasoning node."""
 
     logger.info("Agent node started - processing conversation state")
+    logger.debug(f"[AGENT FLOW] Current messages: {[msg.type for msg in state['messages']]}")
     logger.debug(f"[INIT] Available UI mappings: {TOOL_UI_MAPPING}")
     logger.debug(f"[INIT] State keys: {list(state.keys())}")
     logger.debug(f"[INIT] UI enabled setting: {state.get('ui_enabled', 'not_set')}")    
@@ -950,10 +1531,8 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
         search_flights_tool,
         search_hotels_tool,
         fetch_hotel_rates_tool,
-        create_quote_tool,
-        create_booking_tool,
+        create_hotel_quote_tool,
         fetch_flight_quote_tool,
-        create_flight_booking_tool,
         get_seat_maps_tool,
         list_airline_initiated_changes_tool,
         update_airline_initiated_change_tool,
@@ -961,7 +1540,10 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
         change_flight_booking_tool,
         cancel_flight_booking_tool,
         cancel_hotel_booking_tool,
-        update_hotel_booking_tool
+        update_hotel_booking_tool,
+        pay_later_tool,
+        flight_payment_sequence_tool,
+        hotel_payment_sequence_tool
     ]
     llm_with_tools = llm.bind_tools(tools)
     
@@ -1034,7 +1616,8 @@ Since rich UI components (hotel cards, flight results, etc.) will be displayed t
     # Create messages with system prompt
     messages = [HumanMessage(content=system_prompt)] +  state["messages"]
     for idx, msg in enumerate(messages):
-            logger.info(f"Message {idx}: role={getattr(msg, 'role', None)}, content={getattr(msg, 'content', None)}, tool_calls={getattr(msg, 'tool_calls', None)}")
+        pass
+            # logger.info(f"Message {idx}: role={getattr(msg, 'role', None)}, content={getattr(msg, 'content', None)}, tool_calls={getattr(msg, 'tool_calls', None)}")
     
     response = llm_with_tools.invoke(messages)
 
@@ -1135,6 +1718,7 @@ Since rich UI components (hotel cards, flight results, etc.) will be displayed t
 def human_input_node(state: AgentState) -> Dict[str, Any]:
     """Node for handling human input interrupts."""
     logger.info("Human input node triggered - pausing for user interaction")
+    logger.debug(f"[AGENT FLOW] Last message content: {state['messages'][-1].content if state['messages'] else 'No messages'}")
     # This will pause execution and wait for human input
     raise GraphInterrupt("Please provide additional input or guidance for the agent.")
 
@@ -1174,10 +1758,8 @@ def create_graph():
             search_flights_tool,
             search_hotels_tool,
             fetch_hotel_rates_tool,
-            create_quote_tool,
-            create_booking_tool,
+            create_hotel_quote_tool,
             fetch_flight_quote_tool,
-            create_flight_booking_tool,
             get_seat_maps_tool,
             list_airline_initiated_changes_tool,
             update_airline_initiated_change_tool,
@@ -1185,7 +1767,10 @@ def create_graph():
             change_flight_booking_tool,
             cancel_flight_booking_tool,
             cancel_hotel_booking_tool,
-            update_hotel_booking_tool
+            update_hotel_booking_tool,
+            pay_later_tool,
+            flight_payment_sequence_tool,
+            hotel_payment_sequence_tool
         ]
         logger.debug(f"Initializing ToolNode with {len(tools)} tools: {[tool.name for tool in tools]}")
         tool_node = ToolNode(tools)

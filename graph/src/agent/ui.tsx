@@ -1,4 +1,7 @@
 import React, { useState } from 'react';
+import { v4 as uuidv4 } from "uuid";
+import { useStreamContext } from "@langchain/langgraph-sdk/react-ui";
+import { Message } from "@langchain/langgraph-sdk";
 
 // Hotel search result component
 const HotelResultCard = ({ hotels }) => {
@@ -140,8 +143,270 @@ const HotelResultCard = ({ hotels }) => {
       </div>
     );
   };
+
+  interface BookingMetadata {   
+    guests?: Array<{
+      given_name: string;
+      family_name: string;
+    }>;
+  }
+  
+  interface PaymentData {
+    cardNumber: string;
+    expiryMonth: string;
+    expiryYear: string;
+    cvc: string;
+    name: string;
+    metadata?: BookingMetadata;
+  }
+  
+  interface FormField {
+    name: string;
+    label: string;
+    type: string;
+    required: boolean;
+    placeholder?: string;
+  }
+  
+  interface BookingFormData {
+    title?: string;
+    amount?: string;
+    currency?: string;
+    fields?: FormField[];
+  }
+  
+  interface BookingFormProps {
+    amount?: string;
+    currency?: string;
+    data?: BookingFormData;
+    metadata?: BookingMetadata;
+  }
+  
+  const BookingForm: React.FC<BookingFormProps> = ({ 
+    amount, 
+    currency,
+    data,
+    metadata
+  }) => {
+    const stream = useStreamContext();
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [paymentData, setPaymentData] = useState({
+      cardNumber: '',
+      expiryDate: '',
+      cvc: '',
+      name: ''
+    });
+  
+    const handleInputChange = (field: string, value: string) => {
+      setPaymentData(prev => ({ ...prev, [field]: value }));
+    };
+  
+    const handleCardNumberChange = (value: string) => {
+      const formattedValue = value.replace(/\s/g, '').replace(/(\d{4})/g, '$1 ').trim();
+      handleInputChange('cardNumber', formattedValue);
+    };
+  
+    const handleExpiryDateChange = (value: string) => {
+      const formattedValue = value.replace(/\D/g, '').replace(/(\d{2})(\d{0,2})/, '$1/$2').trim();
+      handleInputChange('expiryDate', formattedValue);
+    };
+  
+    const handleSubmit = async () => {
+      setIsSubmitting(true);
+    
+      try {
+        let expiryMonth = '';
+        let expiryYear = '';
+    
+        if (paymentData.expiryDate) {
+          const [month, year] = paymentData.expiryDate.split('/').filter(Boolean);
+          if (month && year) {
+            expiryMonth = month.padStart(2, '0');
+            expiryYear = year.length === 2 ? `20${year}` : year;
+          }
+        }
+    
+        const processedData: PaymentData = {
+          ...paymentData,
+          cardNumber: paymentData.cardNumber.replace(/\s/g, ''),
+          expiryMonth,
+          expiryYear,
+          metadata
+        };
+    
+        // Validation
+        if (!processedData.cardNumber || !processedData.expiryMonth || !processedData.expiryYear || !processedData.cvc || !processedData.name) {
+          throw new Error("Please fill in all required fields");
+        }
+    
+        // Human confirmation message for chat history
+        const newHumanMessage: Message = {
+          id: uuidv4(),
+          type: "human",
+          content: 
+          `
+          Payment Details:
+          Paying By Card
+          Card Number: ${processedData.cardNumber}
+          Expiry: Month: ${processedData.expiryMonth}, Year: ${processedData.expiryYear}
+          CVC: ${processedData.cvc}
+          Name: ${processedData.name}
+          `
+        };
+    
+        await stream.submit(
+          {
+            threadId: stream.threadId,
+            messages: [newHumanMessage] 
+          },
+          {
+            streamMode: ["values"],
+            optimisticValues: (prev) => ({
+              ...prev,
+              messages: [...(prev.messages ?? []), newHumanMessage] // Show human message immediately
+            })
+          }
+        );
+    
+      } catch (error) {
+        alert(error instanceof Error ? error.message : "An unknown error occurred");
+      } finally {
+        setIsSubmitting(false);
+      }
+    };
+  
+    const displayAmount = data?.amount || amount;
+    const displayCurrency = data?.currency || currency;
+    const formTitle = data?.title || "Complete Payment";
+  
+    return (
+      <div className="max-w-md mx-auto bg-white rounded-lg shadow-md p-6">
+        {/* Booking Summary */}
+        {metadata && (
+          <div className="mb-6 bg-gray-50 p-4 rounded-md border border-gray-200">
+            <h3 className="font-bold text-lg mb-2 text-gray-800">Booking Summary</h3>          
+            {metadata.guests && (
+              <p className="text-sm text-gray-700">
+                <span className="font-medium">Guests:</span> {metadata.guests.map((g) => `${g.given_name} ${g.family_name}`).join(', ')}
+              </p>
+            )}
+          </div>
+        )}
+  
+        {/* Payment Amount Display */}
+        {displayAmount && displayCurrency && (
+          <div className="bg-blue-50 border border-blue-200 rounded-md p-4 mb-6 text-center">
+            <p className="text-sm text-blue-800 mb-1">Total Amount</p>
+            <p className="text-xl font-medium text-blue-800">
+              {displayAmount} {displayCurrency}
+            </p>
+          </div>
+        )}
+  
+        {/* Payment Form */}
+        <div className="space-y-4">
+          {data?.fields ? (
+            data.fields.map(field => (
+              <div key={field.name}>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  {field.label}
+                  {field.required && <span className="text-red-500">*</span>}
+                </label>
+                <input
+                  type={field.type}
+                  placeholder={field.placeholder}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={paymentData[field.name as keyof typeof paymentData] || ''}
+                  onChange={(e) => handleInputChange(field.name, e.target.value)}
+                  required={field.required}
+                />
+              </div>
+            ))
+          ) : (
+            <>
+              {/* Card Number */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Card Number
+                </label>
+                <input
+                  type="text"
+                  placeholder="1234 5678 9012 3456"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={paymentData.cardNumber}
+                  onChange={(e) => handleCardNumberChange(e.target.value)}
+                  maxLength={19}
+                  required
+                />
+              </div>
+  
+              <div className="grid grid-cols-2 gap-4">
+                {/* Expiry Date */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Expiry Date
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="MM/YY"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={paymentData.expiryDate}
+                    onChange={(e) => handleExpiryDateChange(e.target.value)}
+                    maxLength={5}
+                    required
+                  />
+                </div>
+  
+                {/* CVC */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    CVC
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="123"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={paymentData.cvc}
+                    onChange={(e) => handleInputChange('cvc', e.target.value)}
+                    maxLength={4}
+                    required
+                  />
+                </div>
+              </div>
+  
+              {/* Cardholder Name */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Cardholder Name
+                </label>
+                <input
+                  type="text"
+                  placeholder="John Smith"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={paymentData.name}
+                  onChange={(e) => handleInputChange('name', e.target.value)}
+                  required
+                />
+              </div>
+            </>
+          )}
+        </div>
+  
+        {/* Submit Button */}
+        <button
+          type="button"
+          onClick={handleSubmit}
+          className="w-full mt-6 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-md transition duration-150 ease-in-out disabled:opacity-50"
+          disabled={isSubmitting || stream.isLoading}
+        >
+          {isSubmitting ? 'Processing Payment...' : 'Pay Now'}
+        </button>
+      </div>
+    );
+  };
   
   export default {
     hotelResults: HotelResultCard,
     flightResults: FlightResultCard,
+    paymentForm: BookingForm
   };

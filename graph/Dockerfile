@@ -1,74 +1,87 @@
+# --------------------------
+# Base image
+# --------------------------
 FROM langchain/langgraph-api:3.11
 
-# Set environment variables for uv
+# --------------------------
+# Environment setup
+# --------------------------
 ENV UV_SYSTEM_PYTHON=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+ENV SHELL=/bin/bash
 
-# Install Node.js 22 LTS and npm for UI compilation using NodeSource (most reliable for mixed environments)
+# --------------------------
+# Install Node.js 22 LTS for UI
+# --------------------------
 RUN apt-get update && \
-    apt-get install -y ca-certificates curl gnupg && \
+    apt-get install -y build-essential ca-certificates curl gnupg && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
-    node --version && \
-    npm --version && \
-    npx --version && \
-    rm -f /usr/lib/python3.11/EXTERNALLY-MANAGED /usr/lib/python3/dist-packages/EXTERNALLY-MANAGED || true
+    node --version && npm --version && npx --version
 
-# Copy project files to expected location
+# --------------------------
+# Copy project code
+# --------------------------
 COPY . /deps/graph
 WORKDIR /deps/graph
 
-# Install dependencies into system Python using uv pip (needed for LangGraph compatibility)
+# --------------------------
+# Install Python project dependencies
+# --------------------------
 RUN uv pip install --system --no-cache-dir .
 
-# Set the graph configuration
+# --------------------------
+# LangGraph configuration
+# --------------------------
 ENV LANGSERVE_GRAPHS='{"agent": "/deps/graph/src/agent/graph.py:graph"}'
-
-# Set UI environment variables for production
-ENV LANGGRAPH_UI='{"agent": "./src/agent/ui.tsx"}'
+ENV LANGGRAPH_UI='{"agent": "/deps/graph/src/agent/ui.tsx"}'
 ENV LANGGRAPH_UI_BUNDLER=true
 
-# Set explicit NODE_PATH and PATH for UI bundler subprocess
+# --------------------------
+# Node.js PATH for UI bundler
+# --------------------------
 ENV NODE_PATH=/usr/lib/node_modules
 ENV PATH=/usr/bin:$PATH
-# Ensure subprocess environment compatibility
-ENV PYTHONUNBUFFERED=1
-ENV SHELL=/bin/bash
 
-# Create required UI bundler directories
+# --------------------------
+# LangGraph UI bundler setup
+# --------------------------
 RUN mkdir -p /deps/graph/.langgraph_api/ui
+RUN npm install -g typescript @types/react @types/react-dom react react-dom next esbuild || true
 
-# Pre-install common UI dependencies to avoid subprocess issues
-RUN npm install -g typescript @types/react @types/react-dom || true
+# Fix 'uuid' import in LangGraph UI
+ENV LANGGRAPH_UI_EXTERNALS='["uuid"]'
+RUN npm install uuid
 
-# Ensure langgraph-api components remain accessible
-RUN mkdir -p /api/langgraph_api /api/langgraph_runtime /api/langgraph_license && \
-    touch /api/langgraph_api/__init__.py /api/langgraph_runtime/__init__.py /api/langgraph_license/__init__.py
-
-# CRITICAL: Reinstall LangGraph API components (including UI) to prevent overwriting
-RUN PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir --no-deps -e /api
-
-# Add our project to Python path
-ENV PYTHONPATH="/deps/graph:$PYTHONPATH"
-
-# Allow pip system installs
-ENV PIP_BREAK_SYSTEM_PACKAGES=1
-
-# Patch Python runtime to ensure asyncio subprocess env is a dict (uvloop compatibility)
+# --------------------------
+# Patch asyncio for uvloop subprocess env
+# --------------------------
 RUN cat > /usr/local/lib/python3.11/site-packages/sitecustomize.py <<'PYEOF'
 import asyncio, os
-
 _orig_create = asyncio.create_subprocess_exec
-
 async def _fixed_create(*args, **kwargs):
     env = kwargs.get('env')
     if isinstance(env, os._Environ):
         kwargs['env'] = dict(env)
     return await _orig_create(*args, **kwargs)
-
 asyncio.create_subprocess_exec = _fixed_create
 PYEOF
 
-WORKDIR /deps/graph 
+# --------------------------
+# Python path for project
+# --------------------------
+ENV PYTHONPATH="/deps/graph:$PYTHONPATH"
+
+# --------------------------
+# Default WORKDIR
+# --------------------------
+WORKDIR /deps/graph
+
+# --------------------------
+# Start LangGraph API for Railway
+# --------------------------
+CMD ["uvicorn", "--host", "0.0.0.0", "--port", "8080", "langgraph_api.server:app"]

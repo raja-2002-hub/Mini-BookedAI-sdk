@@ -318,11 +318,12 @@ async def fetch_flight_offer(offer_id: str) -> Dict[str, Any]:
     endpoint = FlightsEndpoint(client)
     return await endpoint.get_offer(offer_id)
 
-async def create_flight_booking(offer_id: str, passengers: list, payments: list) -> Dict[str, Any]:
+async def create_flight_booking(offer_id: str, passengers: list, payments: list, services: list = None) -> Dict[str, Any]:
     """
     Book a flight using the provided order data.
     This endpoint will fetch the offer, extract Duffel passenger IDs,
     and merge them with the user-supplied passenger info.
+    Supports optional 'services' (e.g., seat selections).
     """
     
     client = get_client()
@@ -363,6 +364,10 @@ async def create_flight_booking(offer_id: str, passengers: list, payments: list)
         "passengers": final_passengers,
         "payments": payments
     }
+    if services:
+        order_data["services"] = services  # Add seat selections if provided
+
+    # 4. Attempt booking
     try:
         return await endpoint.book_flight(order_data)
     except DuffelAPIError as e:
