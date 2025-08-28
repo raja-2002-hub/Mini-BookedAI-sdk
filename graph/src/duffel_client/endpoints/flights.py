@@ -3,6 +3,9 @@ from ..client import DuffelClient, DuffelAPIError, get_client
 from ..models.flights import FlightSearchRequest, FlightSearchResponse
 from datetime import datetime, date, timedelta
 import isodate
+import logging
+
+logger = logging.getLogger(__name__)
 
 class FlightsEndpoint:
     def __init__(self, client: DuffelClient):
@@ -369,6 +372,7 @@ async def create_flight_booking(offer_id: str, passengers: list, payments: list,
 
     # 4. Attempt booking
     try:
+        logger.info(f"Booking flight with order data: {order_data}")
         return await endpoint.book_flight(order_data)
     except DuffelAPIError as e:
         # Try to extract a useful error message

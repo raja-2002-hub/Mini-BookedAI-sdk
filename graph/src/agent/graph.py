@@ -54,7 +54,9 @@ from src.duffel_client.endpoints.payments import (
     create_multi_use_card,
     create_single_use_from_multi_use,
     pay_later_for_order,
-    create_balance_payment
+    create_balance_payment,
+    create_stripe_payment_intent,
+    create_stripe_token
 )
 
 # Configure logging
@@ -1003,8 +1005,36 @@ async def flight_payment_sequence_tool(
         
     logger.info("Step 2: Processing payment")
     if not is_live:
-        logger.info("TEST MODE: Converting all payments to balance")
-        payments = [await create_balance_payment(amount, currency)]
+        logger.info(f"Stripe Integration: Creating test balance payment::{payment_method}")
+        card_details = {
+            "card[number]": payment_method.get("card_number"),
+            "card[exp_month]": payment_method.get("expiry_month"),
+            "card[exp_year]": payment_method.get("expiry_year"),
+            "card[cvc]": payment_method.get("cvc") or payment_method.get("cvv"),
+            "card[name]": payment_method.get("cardholder_name")
+        }
+        token_response = await create_stripe_token(card_details)
+        token_id = token_response["token_id"]
+        logger.info(f"Created Stripe token: {token_id}")
+
+        # Create Stripe Payment Intent
+        intent_response = await create_stripe_payment_intent(
+            amount=amount,
+            currency=currency,
+            token_id=token_id,
+            return_url="https://your-server.com/return"
+        )
+        payment_intent_id = intent_response["payment_intent_id"]
+        logger.info(f"Created Stripe Payment Intent: {payment_intent_id}")
+        
+        # Create payment object for Duffel
+        payment = {
+            "type": "balance",  
+            "amount": amount,
+            "currency": currency,
+            "stripe_payment_intent_id": payment_intent_id
+        }
+        payments = [payment]
     else:
         if payment_method.get("type") == "balance":
             # Balance payment - use directly                
@@ -1156,14 +1186,44 @@ async def hotel_payment_sequence_tool(
             return json.dumps({"error": f"Quote creation failed: {quote_data['error']}"})
         
         quote_id = quote_data.get("data", {}).get("id") or quote_data.get("quote_id")
+        total_currency= quote_data.get("data", {}).get("total_currency") or quote_data.get("total_currency")
+        total_amount= quote_data.get("data", {}).get("total_amount") or quote_data.get("total_amount")
+        
         if not quote_id:
             return json.dumps({"error": "Could not extract quote ID from response"})
         
-        # Step 2: Process payment - FORCE BALANCE IN TEST MODE
+        # Step 2: Process payment
         logger.info("Step 2: Processing payment")
         if not is_live:
-            logger.info("TEST MODE: Converting all payments to balance")
-            payments = []
+            logger.info(f"Stripe Integration: Creating test balance payment::{payment_method}")
+            card_details = {
+                "card[number]": payment_method.get("card_number"),
+                "card[exp_month]": payment_method.get("expiry_month"),
+                "card[exp_year]": payment_method.get("expiry_year"),
+                "card[cvc]": payment_method.get("cvc") or payment_method.get("cvv"),
+                "card[name]": payment_method.get("cardholder_name")
+            }
+            token_response = await create_stripe_token(card_details)
+            token_id = token_response["token_id"]
+            logger.info(f"Created Stripe token: {token_id}")
+
+            # Create Stripe Payment Intent
+            intent_response = await create_stripe_payment_intent(
+                amount=total_amount,
+                currency=total_currency,
+                token_id=token_id,
+                return_url="https://your-server.com/return"
+            )
+            payment_intent_id = intent_response["payment_intent_id"]
+            logger.info(f"Created Stripe Payment Intent: {payment_intent_id}")
+            
+            # Create payment object for Duffel
+            payment = {
+                "type": "balance",  
+                "amount": str(total_amount),
+                "currency": total_currency,
+                "stripe_payment_intent_id": payment_intent_id
+            }
         else:
             # LIVE MODE - process actual card payment
             if payment_method.get("type") == "balance":
@@ -1174,21 +1234,19 @@ async def hotel_payment_sequence_tool(
                     payment = await build_card_payment(
                         payment_method, quote_id, config.DUFFEL_API_TOKEN
                     )
-                    payments = [payment]
-                    logger.info(f"Live card: {payments}")
                 except Exception as e:
                     return json.dumps({"error": f"Payment processing failed: {str(e)}"})
         
         # Step 3: Create booking
         logger.info("Step 3: Creating booking")
-        logger.info(f"Payment: {payments}")
+        logger.info(f"Payment: {payment}")
         booking_result = await create_booking(
             quote_id=quote_id,
             guests=guests,
             email=email,
             stay_special_requests=stay_special_requests,
             phone_number=phone_number,
-            payment=payments[0] if payments else None
+            payment=payment if payment else None
         )
         
         logger.info("Hotel payment sequence completed successfully")

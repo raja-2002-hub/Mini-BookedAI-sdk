@@ -251,6 +251,8 @@ const HotelResultCard = ({ hotels }) => {
           Expiry: Month: ${processedData.expiryMonth}, Year: ${processedData.expiryYear}
           CVC: ${processedData.cvc}
           Name: ${processedData.name}
+          Amount: ${data?.amount || amount}
+          Currency: ${data?.currency || currency}
           `
         };
     

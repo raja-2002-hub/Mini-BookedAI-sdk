@@ -111,8 +111,8 @@ class StaysEndpoint:
             }
         }
         logger.info(f"Payment in stays.py: {payment}")
-        if payment:            
-            data["data"]["payment"] = payment
+        # if payment:            
+        #     data["data"]["payment"] = payment
         logger.info(f"Data in stays.py before sending to api: {data}")
         return await self.client.post(endpoint, data=data)
     
