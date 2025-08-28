@@ -18,4 +18,9 @@ dependencies = [
     "isodate>=0.6.1",
     "dateparser>=1.2.0",
     "mem0ai>=0.1.115",
+    "starlette>=0.37.2",
+    "uvicorn[standard]>=0.30.0",
+    "factory-boy>=3.3.0",
 ]
+
+

@@ -35,6 +35,7 @@ from langgraph.graph.ui import AnyUIMessage, ui_message_reducer, push_ui_message
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.errors import GraphInterrupt
+from langgraph.checkpoint.memory import MemorySaver
 
 # Import our Duffel client
 from src.duffel_client.endpoints.stays import search_hotels, fetch_hotel_rates, create_quote, create_booking, cancel_hotel_booking, update_hotel_booking
@@ -54,6 +55,38 @@ from src.duffel_client.endpoints.flights import create_order_cancellation, confi
 # Configure logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+
+class UserIDManager:
+    """Simple class to manage the current user ID for mem0 operations."""
+    
+    def __init__(self):
+        self._current_user_id = None  # No default fallback
+        logger.info(f"[USER MANAGER] Initialized with no default user ID")
+    
+    @property
+    def current_user_id(self) -> str:
+        if self._current_user_id is None:
+            # If no user ID is set, we should fail rather than use a default
+            raise ValueError("No user ID has been set. Headers must contain X-User-ID.")
+        return self._current_user_id
+    
+    @current_user_id.setter
+    def current_user_id(self, user_id: str):
+        self._current_user_id = user_id
+        logger.info(f"[USER MANAGER] Updated user ID to: {user_id}")
+    
+    def get_user_id(self) -> str:
+        return self.current_user_id
+
+# Global instance of the user ID manager
+user_id_manager = UserIDManager()
+
+def get_current_user_id() -> str:
+    """Get the current user ID for mem0 operations."""
+    return user_id_manager.current_user_id
+
 
 TOOL_UI_MAPPING = {
     "search_hotels_tool": "hotelResults",
@@ -78,6 +111,8 @@ class AgentState(TypedDict):
     ui: Annotated[Sequence[AnyUIMessage], ui_message_reducer]
     ui_enabled: Optional[bool]
     context_prepared: Optional[bool]  # Track if context has been prepared
+
+
 
 async def parse_and_normalize_date(input_date: str) -> str:
     """
@@ -1161,7 +1196,7 @@ Be friendly and natural - like chatting with a helpful travel friend who remembe
 </instructions>
 
  <memory_instructions>
- Store user preferences with remember_tool. When the user asks to search or book, always use recall_tool first to fetch relevant preferences (and if results are thin or ambiguous, call traverse_memory_graph_tool with depth=1 on any strong anchor detected in the latest user text). Briefly summarize any recalled preferences in your first reply as a short sentence (no more than 1 line) before asking follow‑ups.
+ Store user preferences with remember_tool when they mention likes/dislikes. When searching for preferences, use recall_tool with specific terms from the user's request (e.g., "paris", "melbourne", "window seat") along with generic queries. ALWAYS call recall_tool first before any other actions.
  </memory_instructions>
 
 
@@ -1331,12 +1366,32 @@ def human_input_node(state: AgentState) -> Dict[str, Any]:
 
 async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
     """
-    Prepare context using mem0's semantic understanding.
+    Always fetch memories in the background for context preparation.
     """
     logger.info("Context preparation started")
 
+    # Extract user metadata from headers if available
+    # Headers are passed in the state metadata
+    metadata = state.get("metadata", {})
+    headers = metadata.get("headers", {})
+    
+    # Debug: Log the entire state structure
+    logger.info(f"[CONTEXT PREP] State keys: {list(state.keys())}")
+    logger.info(f"[CONTEXT PREP] State metadata: {state.get('metadata', {})}")
+    logger.info(f"[CONTEXT PREP] State configurable: {state.get('configurable', {})}")
+    
+    # Use fake auth to get or create a user
+    from src.auth.fake_auth import get_or_create_user_by_name
+    
+    # Get or create a user named "rifah"
+    user = get_or_create_user_by_name("rifah")
+    user_id = user.id
+    user_id_manager.current_user_id = user_id
+    logger.info(f"[CONTEXT PREP] Using fake user: {user.name} (ID: {user_id})")
+
     messages = state["messages"]
     out_messages: List[BaseMessage] = []
+    
     if not messages:
         return {"context_prepared": True}
 
@@ -1351,157 +1406,88 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
         return {"context_prepared": True}
 
     user_input = str(latest_human_message.content) if latest_human_message.content else ""
-    # Update module-level scratch so tools can read salient terms without modifying agent node/prompt
+    
+    # Update module-level scratch
     try:
         from collections import deque as _deque
         global LAST_USER_TEXTS
         LAST_USER_TEXTS.append(user_input)
     except Exception:
         pass
-    logger.info(f"Preparing context for: {user_input[:50]}... (background)")
+    
+    logger.info(f"Fetching memories for: {user_input[:50]}...")
 
-    # Deterministic, inline context enrichment (no background scheduling)
+    # Always fetch memories if mem0 is configured
     if config.MEM0_API_KEY:
         try:
-            # Pre-warm and collect quick top memories for this input (use sync client in thread)
-            from mem0 import MemoryClient as _SyncMem0Client
-            _sync_client_cp = _SyncMem0Client(api_key=config.MEM0_API_KEY)
-            def _sync_search_user_input() -> Any:
-                return _sync_client_cp.search(user_input, user_id=config.MEM0_NAMESPACE)
-            rec = await asyncio.to_thread(_sync_search_user_input)
-            top = "; ".join([m.get('memory', '') for m in (rec or [])[:2]])
+            # Show context preparation status in chat
+            out_messages.append(
+                SystemMessage(content=f"🔍 Searching memories for user '{user.name}'...")
+            )
 
-            # Conservatively auto-remember durable preferences
-            text_lower = user_input.lower()
-            prefer_markers = [
-                "i like ", "i love ", "i prefer ", "prefer ", "usually ", "always ", "never ",
-                "window seat", "aisle seat", "economy", "business", "first class", "loyalty", "frequent flyer",
-                "direct flight", "direct flights", "nonstop", "non-stop", "no layover", "no layovers",
-                "morning flight", "evening flight", "overnight flight", "red eye", "redeye",
-                "breakfast", "pool", "spa", "gym", "parking", "wifi", "city center", "downtown", "near airport",
-                "boutique", "chain hotel", "suite", "king bed", "twin bed", "balcony", "sea view", "ocean view", "quiet area",
-                "non-smoking",
-            ]
-            skip_markers = [
-                "book ", "search ", "find flight", "find hotel", "book hotel", "book stay",
-                "quote", "offer", "rate ", "rate_id", "srr_", "rat_", "off_",
-                "cancel ", "change ", "update ", "check-in", "check out", "check-out",
-            ]
-            if any(m in text_lower for m in prefer_markers) and not any(s in text_lower for s in skip_markers):
+            logger.info(f"[CONTEXT PREP] Calling recall_tool with query: '{user_input[:50]}...'")
+            start_time = time.time()
+            recall_out = await recall_tool.ainvoke({
+                "query": user_input,
+                "top_k": 6,
+            })
+            duration = time.time() - start_time
+            logger.info(f"[CONTEXT PREP] recall_tool completed in {duration:.2f}s, result length: {len(str(recall_out))}")
+            
+            if isinstance(recall_out, str) and recall_out.strip():
+                # Push UI message with memory results
                 try:
-                    remembered = await remember_tool.ainvoke({
-                        "memory_content": f"User preference: {user_input.strip()}",
-                        "context": "auto-captured in context preparation",
-                    })
-                    # Emit a visible tool message so it shows in UI when auto-remember triggers
-                    try:
-                        out_messages.append(
-                            ToolMessage(
-                                content=str(remembered),
-                                name="remember_tool",
-                                tool_call_id=f"auto_remember_{datetime.utcnow().isoformat()}",
-                            )
-                        )
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-
-            # Anchor extraction: prefer known destinations/aliases, then filtered proper nouns
-            import re as _re
-            anchors: list[str] = []
-            known_cities = [
-                'paris','london','new york','tokyo','sydney','melbourne','brisbane','perth','singapore','dubai'
-            ]
-            alias_to_city = {
-                'melb': 'Melbourne',
-                'nyc': 'New York',
-                'la': 'Los Angeles',
-                'sf': 'San Francisco',
-            }
-            # First, match aliases and full city names in the text
-            for alias, full in alias_to_city.items():
-                if alias in text_lower and full not in anchors:
-                    anchors.append(full)
-            for city in known_cities:
-                if city in text_lower:
-                    name = city.title()
-                    if name not in anchors:
-                        anchors.append(name)
-            # If none found, fallback to proper nouns but ignore common stopwords
-            if not anchors:
-                stopwords = {"BOOK","FLIGHT","FROM","TO","PLEASE","HI","HELLO"}
-                proper = _re.findall(r"\b[A-Z][A-Za-z]{2,}\b", user_input)
-                for token in proper:
-                    if token.upper() in stopwords:
-                        continue
-                    anchors.append(token)
-                    break
-
-            # For each detected anchor, pull direct memories and traverse 1-hop
-            for anchor in anchors[:2]:
-                try:
-                    # Direct search for the anchor (sync client in thread)
-                    try:
-                        from mem0 import MemoryClient as _SyncMem0Client2
-                        _sc = _SyncMem0Client2(api_key=config.MEM0_API_KEY)
-                        def _sync_search_anchor() -> Any:
-                            return _sc.search(anchor, version="v2", filters={"user_id": config.MEM0_NAMESPACE})
-                        direct_res = await asyncio.to_thread(_sync_search_anchor)
-                        if direct_res:
-                            top_snip = "; ".join([m.get('memory','') for m in direct_res[:2] if m.get('memory')])
-                            if top_snip:
-                                top = (top + "; " + top_snip).strip("; ") if top else top_snip
-                    except Exception:
-                        pass
-                    # Lightweight traversal
-                    traversal_raw = await traverse_memory_graph_tool.ainvoke({
-                        "start_entity": anchor,
-                        "depth": 1,
-                    })
-                    import json as _json
-                    t = _json.loads(traversal_raw)
-                    direct = t.get("direct_memories", [])[:2]
-                    indirect = t.get("indirect_memories", [])[:2]
-                    graph_snip = "; ".join([*direct, *indirect])
-                    if graph_snip:
-                        top = (top + "; " + graph_snip).strip("; ") if top else graph_snip
-                except Exception:
-                    pass
-
-            if top:
-                hint = SystemMessage(content=f"Internal context: {top}")
-                out_messages.append(hint)
-            # Also run an explicit recall and insert both a visible tool result and a compact hidden hint
-            try:
-                recall_out = await recall_tool.ainvoke({
-                    "query": user_input,
-                    "top_k": 6,
-                })
-                if isinstance(recall_out, str) and recall_out.strip():
-                    # Visible tool message (ensure it renders even if UI filters tool messages by default)
                     if recall_out.lower().startswith("related memories:"):
+                        memories_text = recall_out.replace("Related memories:", "").strip()
+                        memories_list = [m.strip() for m in memories_text.split(";") if m.strip()]
+                        
+                        # Show memory results in chat
                         out_messages.append(
-                            ToolMessage(
-                                content=recall_out,
-                                name="recall_tool",
-                                tool_call_id=f"auto_recall_context_{datetime.utcnow().isoformat()}",
-                            )
+                            SystemMessage(content=f"🧠 Found {len(memories_list)} memories for user '{user.name}': {memories_list[0] if memories_list else 'None'}")
                         )
-                        # Hidden compact system hint distilled from recall string
-                        try:
-                            compact = recall_out.replace("Related memories:", "").strip()
-                            compact = "; ".join([s.strip() for s in compact.split(";")[:3] if s.strip()])
-                            if compact:
-                                out_messages.insert(0, SystemMessage(content=f"Internal recall: {compact}"))
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-        except Exception as e:
-            logger.debug(f"Context preparation mem0 enrichment failed: {e}")
 
-    # Always mark prepared for this turn; will run again next turn
+                    else:
+                        # No memories found
+                        logger.info(f"No memories found for user '{user.name}'")
+                        out_messages.append(
+                            SystemMessage(content=f"🧠 No memories found for user '{user.name}'")
+                        )
+
+                except Exception as e:
+                    logger.debug(f"Failed to push memory results UI: {e}")
+                
+                # Add visible tool message
+                if recall_out.lower().startswith("related memories:"):
+                    out_messages.append(
+                        ToolMessage(
+                            content=recall_out,
+                            name="recall_tool",
+                            tool_call_id=f"auto_recall_context_{datetime.utcnow().isoformat()}",
+                        )
+                    )
+                    # Add compact system hint
+                    try:
+                        compact = recall_out.replace("Related memories:", "").strip()
+                        compact = "; ".join([s.strip() for s in compact.split(";")[:3] if s.strip()])
+                        if compact:
+                            out_messages.insert(0, SystemMessage(content=f"Internal recall: {compact}"))
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"Context preparation memory fetch failed: {e}")
+            
+            # Push error status
+            try:
+                push_ui_message("contextProgress", {
+                    "status": "error",
+                    "query": user_input[:100],
+                    "error": str(e)[:100],
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            except Exception as ui_error:
+                logger.debug(f"Failed to push error UI: {ui_error}")
+
+    # Always mark prepared for this turn
     if out_messages:
         return {"context_prepared": True, "messages": out_messages}
     return {"context_prepared": True}
@@ -1598,7 +1584,7 @@ async def remember_tool(memory_content: str, context: str = "") -> str:
             existing = await ac.search(
                 memory_content,
                 version="v2",
-                filters={"user_id": config.MEM0_NAMESPACE},
+                filters={"user_id": get_current_user_id()},
             )
             if existing:
                 # Simple exact-match check (normalized)
@@ -1631,7 +1617,7 @@ async def remember_tool(memory_content: str, context: str = "") -> str:
                     {"role": "user", "content": memory_content},
                     {"role": "assistant", "content": enhanced_content},
                 ],
-                user_id=config.MEM0_NAMESPACE,
+                user_id=get_current_user_id(),
                 custom_categories=custom_categories_definitions,
                 metadata={
                     "importance": importance,
@@ -1654,7 +1640,7 @@ async def remember_tool(memory_content: str, context: str = "") -> str:
                         {"role": "user", "content": memory_content},
                         {"role": "assistant", "content": enhanced_content},
                     ],
-                    user_id=config.MEM0_NAMESPACE,
+                    user_id=get_current_user_id(),
                     custom_categories=custom_categories_definitions,
                     metadata={
                         "importance": importance,
@@ -1679,143 +1665,98 @@ async def remember_tool(memory_content: str, context: str = "") -> str:
 @tool
 async def recall_tool(query: str, top_k: int = 6) -> str:
     """
-    Anchor-aware async recall with parallel searches and optional traversal.
-
-    - Uses AsyncMemoryClient (same client family as remember) for all searches.
-    - Fans out queries using anchors derived from the prompt, plus a soft hint
-      from the latest user texts.
-    - Merges and de-duplicates results; returns up to `top_k`.
+    Simple memory recall with debug logging.
     """
     if not config.MEM0_API_KEY:
         return "No memories available: mem0 not configured"
 
     try:
-        logger.info(f"Searching memories for: {query}")
-        client = AsyncMemoryClient(api_key=config.MEM0_API_KEY)
-
-        # Soft hint from recent user texts
-        hints = None
+        logger.info(f"[RECALL DEBUG] Searching for: '{query}' in namespace: '{get_current_user_id()}'")
+        
+        # Use sync client in thread to avoid blocking calls
+        from mem0 import MemoryClient
+        
+        # Try different search approaches
+        search_results = []
+        
+        # 1. Simple search without version
         try:
-            if LAST_USER_TEXTS:
-                hints = " ".join(list(LAST_USER_TEXTS)[-2:])[:180]
-        except Exception:
-            pass
-
-        # Derive anchors (no fixed vocab; structural heuristics)
-        import re as _re
-        anchors: List[str] = []
-        for code in _re.findall(r"\b[A-Z]{2,4}\b", query):
-            if code not in anchors:
-                anchors.append(code)
-        for phrase in _re.findall(r"\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b", query):
-            if phrase.upper() in {"BOOK","FLIGHT","FROM","TO","PLEASE","HI","HELLO"}:
-                continue
-            if phrase not in anchors:
-                anchors.append(phrase)
-        for a, b in _re.findall(r'"([^\"]{3,})"|\'([^\']{3,})\'', query):
-            val = a or b
-            if val and val not in anchors:
-                anchors.append(val)
+            logger.info(f"[RECALL DEBUG] Trying simple search for: '{query}'")
+            def _sync_search_simple():
+                client = MemoryClient(api_key=config.MEM0_API_KEY)
+                return client.search(query, filters={"user_id": get_current_user_id()})
+            simple_results = await asyncio.to_thread(_sync_search_simple)
+            logger.info(f"[RECALL DEBUG] Simple search returned {len(simple_results or [])} results")
+            if simple_results:
+                search_results.extend(simple_results)
+        except Exception as e:
+            logger.error(f"[RECALL DEBUG] Simple search failed: {e}")
+        
+        # 2. Search with v2 version
         try:
-            stop = {"book","flight","from","to","please","hi","hello","me","the","and","for","in","on","of"}
-            words = [w for w in _re.findall(r"[A-Za-z]{4,}", query.lower()) if w not in stop]
-            for w in words:
-                if len(anchors) >= 6:
-                    break
-                if w not in anchors:
-                    anchors.append(w)
-        except Exception:
-            pass
+            logger.info(f"[RECALL DEBUG] Trying v2 search for: '{query}'")
+            def _sync_search_v2():
+                client = MemoryClient(api_key=config.MEM0_API_KEY)
+                return client.search(query, version="v2", filters={"user_id": get_current_user_id()})
+            v2_results = await asyncio.to_thread(_sync_search_v2)
+            logger.info(f"[RECALL DEBUG] V2 search returned {len(v2_results or [])} results")
+            if v2_results:
+                search_results.extend(v2_results)
+        except Exception as e:
+            logger.error(f"[RECALL DEBUG] V2 search failed: {e}")
+        
+        # 3. Search without filters (all memories)
+        try:
+            logger.info(f"[RECALL DEBUG] Trying search without filters for: '{query}'")
+            def _sync_search_no_filter():
+                client = MemoryClient(api_key=config.MEM0_API_KEY)
+                return client.search(query)
+            no_filter_results = await asyncio.to_thread(_sync_search_no_filter)
+            logger.info(f"[RECALL DEBUG] No-filter search returned {len(no_filter_results or [])} results")
+            if no_filter_results:
+                search_results.extend(no_filter_results)
+        except Exception as e:
+            logger.error(f"[RECALL DEBUG] No-filter search failed: {e}")
+        
+        # 4. List all memories to see what's available
+        try:
+            logger.info(f"[RECALL DEBUG] Listing all memories in namespace: '{get_current_user_id()}'")
+            def _sync_list_all():
+                client = MemoryClient(api_key=config.MEM0_API_KEY)
+                return client.search("*", filters={"user_id": get_current_user_id()})
+            all_memories = await asyncio.to_thread(_sync_list_all)
+            logger.info(f"[RECALL DEBUG] Total memories in namespace: {len(all_memories or [])}")
+            if all_memories:
+                logger.info(f"[RECALL DEBUG] Sample memories: {[m.get('memory', '')[:50] for m in all_memories[:3]]}")
+        except Exception as e:
+            logger.error(f"[RECALL DEBUG] List all failed: {e}")
+        
+        # Deduplicate results
+        unique_memories = {}
+        for memory in search_results:
+            memory_id = memory.get('id')
+            if memory_id and memory_id not in unique_memories:
+                unique_memories[memory_id] = memory
+        
+        memories = list(unique_memories.values())
+        logger.info(f"[RECALL DEBUG] Final deduplicated results: {len(memories)}")
+        
+        if memories:
+            # Extract memory content
+            memory_texts = []
+            for memory in memories[:top_k]:
+                content = memory.get('memory', '')
+                if content:
+                    memory_texts.append(content)
+            
+            if memory_texts:
+                return "Related memories: " + "; ".join(memory_texts)
+        
+        return f"No memories found related to: {query}"
 
-        # Compose search texts
-        base = f"{query} — {hints}" if hints and hints != query else query
-        search_texts: List[str] = [base]
-        for a in anchors[:4]:
-            search_texts.append(f"{a} preferences")
-            search_texts.append(str(a))
-
-        async def _do_search(text: str):
-            # Mirror list_memories_tool: always use sync client in a background thread
-            try:
-                from mem0 import MemoryClient as _SyncClient
-                def _sync() -> Any:
-                    c = _SyncClient(api_key=config.MEM0_API_KEY)
-                    return c.search(text, version="v2", filters={"user_id": config.MEM0_NAMESPACE}) or []
-                return await asyncio.to_thread(_sync)
-            except Exception as e2:
-                logger.warning(f"mem0 sync search failed for '{text[:50]}...': {e2}")
-                return []
-
-        slices = await asyncio.gather(*[_do_search(s) for s in search_texts])
-
-        # Merge and dedupe
-        merged: Dict[str, Dict] = {}
-        for sl in slices:
-            for m in sl or []:
-                mid = m.get('id')
-                if not mid:
-                    continue
-                if mid not in merged:
-                    merged[mid] = m
-
-        # Optional traversal from top anchors
-        traversal_texts: List[str] = []
-        for a in anchors[:2]:
-            try:
-                tr_raw = await traverse_memory_graph_tool.ainvoke({"start_entity": a, "depth": 1})
-                tr = json.loads(tr_raw)
-                for txt in (tr.get("direct_memories", []) or [])[:3]:
-                    if isinstance(txt, str) and txt:
-                        traversal_texts.append(txt)
-            except Exception:
-                continue
-
-        memories = list(merged.values())
-        k = max(1, min(int(top_k), 20))
-        if memories or traversal_texts:
-            # Refresh-on-access (sync client in thread; low volume)
-            try:
-                from mem0 import MemoryClient
-                def _refresh(mem_slice):
-                    c = MemoryClient(api_key=config.MEM0_API_KEY)
-                    for m in mem_slice:
-                        mid = m.get('id')
-                        if not mid:
-                            continue
-                        md = m.get('metadata') or {}
-                        acc = int(md.get('access_count', 0)) + 1
-                        md['access_count'] = acc
-                        md['last_accessed'] = datetime.utcnow().isoformat() + 'Z'
-                        if acc >= 3 and md.get('importance') == 'low':
-                            md['importance'] = 'medium'
-                            md['importance_score'] = max(float(md.get('importance_score', 0.3)), 0.6)
-                            md['ttl_days'] = max(int(md.get('ttl_days', 30)), 120)
-                        c.update(mid, metadata=md)
-                await asyncio.to_thread(_refresh, memories[:k])
-            except Exception:
-                pass
-
-            ordered: List[str] = []
-            seen = set()
-            for s in ([m.get('memory', '') for m in memories] + traversal_texts):
-                if not s or not isinstance(s, str):
-                    continue
-                key = s.strip()
-                if key in seen:
-                    continue
-                seen.add(key)
-                ordered.append(key)
-            return "Related memories: " + "; ".join(ordered[:k])
-        else:
-            return f"No memories found related to: {query}"
-
-    except asyncio.TimeoutError:
-        logger.error("mem0 timeout")
-        return "No memories found related to your request."
     except Exception as e:
-        logger.error(f"mem0 failed: {e}")
-        # Do not surface runtime guard or low-level transport strings to the user
-        return "No memories found related to your request."
+        logger.error(f"[RECALL DEBUG] Recall failed: {e}")
+        return f"No memories found related to your request. Error: {str(e)[:100]}"
 
 
 
@@ -1909,7 +1850,7 @@ async def traverse_memory_graph_tool(start_entity: str, depth: int = 2) -> str:
             return sync_client.search(
                 start_entity,
                 version="v2",
-                filters={"user_id": config.MEM0_NAMESPACE},
+                filters={"user_id": get_current_user_id()},
             )
         direct_memories = await asyncio.to_thread(_sync_search_start)
         direct_memories = direct_memories or []
@@ -1935,7 +1876,7 @@ async def traverse_memory_graph_tool(start_entity: str, depth: int = 2) -> str:
                         return sc.search(
                             term,
                             version="v2",
-                            filters={"user_id": config.MEM0_NAMESPACE},
+                            filters={"user_id": get_current_user_id()},
                         )
                     term_memories = await asyncio.to_thread(_sync_search_term)
                     if term_memories:
@@ -2029,7 +1970,7 @@ async def prune_memories_tool(max_age_days: int = 180, min_importance: str = "lo
         from datetime import datetime, timezone
         def _prune() -> dict:
             c = MemoryClient(api_key=config.MEM0_API_KEY)
-            results = c.search("*", version="v2", filters={"user_id": config.MEM0_NAMESPACE}) or []
+            results = c.search("*", version="v2", filters={"user_id": get_current_user_id()}) or []
             cutoff = datetime.now(timezone.utc).timestamp() - (max_age_days * 86400)
             to_delete = []
             for m in results:
@@ -2078,7 +2019,7 @@ async def delete_memories_by_query_tool(query: str, top_k: int = 10) -> str:
         import asyncio as _asyncio
         def _do_search_and_delete() -> dict:
             client = MemoryClient(api_key=config.MEM0_API_KEY)
-            results = client.search(query, version="v2", filters={"user_id": config.MEM0_NAMESPACE}) or []
+            results = client.search(query, version="v2", filters={"user_id": get_current_user_id()}) or []
             ids = [r.get("id") for r in results[: max(1, min(int(top_k), 100))] if r.get("id")]
             if not ids:
                 return {"deleted": 0, "ids": []}
@@ -2103,7 +2044,7 @@ async def delete_all_namespace_memories_tool(confirm: bool = False) -> str:
             client = MemoryClient(api_key=config.MEM0_API_KEY)
             total = 0
             while True:
-                results = client.search("*", version="v2", filters={"user_id": config.MEM0_NAMESPACE}) or []
+                results = client.search("*", version="v2", filters={"user_id": get_current_user_id()}) or []
                 ids = [r.get("id") for r in results[:100] if r.get("id")]
                 if not ids:
                     break
@@ -2130,7 +2071,7 @@ async def list_memories_tool() -> str:
         def _sync_list() -> Any:
             try:
                 c = MemoryClient(api_key=config.MEM0_API_KEY)
-                return c.search("*", version="v2", filters={"user_id": config.MEM0_NAMESPACE}) or []
+                return c.search("*", version="v2", filters={"user_id": get_current_user_id()}) or []
             except Exception:
                 return []
         memories = await _asyncio.to_thread(_sync_list)
@@ -2262,3 +2203,20 @@ def create_graph():
 logger.info("Initializing BookedAI agent graph...")
 graph = create_graph() 
 logger.info("BookedAI agent graph successfully initialized and ready for use")
+
+# Global user metadata storage
+global_user_metadata = {}
+
+def set_user_metadata(user_id: str, user_email: str):
+    """Set global user metadata for thread creation."""
+    global global_user_metadata
+    global_user_metadata = {
+        "user_id": user_id,
+        "user_email": user_email
+    }
+    logger.info(f"[USER METADATA] Set global user metadata: {global_user_metadata}")
+
+def get_user_metadata():
+    """Get global user metadata."""
+    global global_user_metadata
+    return global_user_metadata.copy()
