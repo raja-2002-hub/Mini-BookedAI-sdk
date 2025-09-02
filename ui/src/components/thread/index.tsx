@@ -3,6 +3,7 @@ import { ReactNode, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useStreamContext } from "@/providers/Stream";
+import { useThreads } from "@/providers/Thread";
 import { useState, FormEvent } from "react";
 import { Button } from "../ui/button";
 import { Checkpoint, Message } from "@langchain/langgraph-sdk";
@@ -119,6 +120,7 @@ export function Thread() {
   const isLargeScreen = useMediaQuery("(min-width: 1024px)");
 
   const stream = useStreamContext();
+  const { currentUser } = useThreads();
   const messages = stream.messages;
   const isLoading = stream.isLoading;
 
@@ -194,8 +196,17 @@ export function Thread() {
     const context =
       Object.keys(artifactContext).length > 0 ? artifactContext : undefined;
 
+    console.log("[THREAD SUBMIT] Submitting with user:", currentUser?.uid, currentUser?.email);
+    console.log("[THREAD SUBMIT] Headers being sent:", currentUser ? {
+      "X-User-ID": currentUser.uid,
+      "X-User-Email": currentUser.email || currentUser.uid,
+    } : "No user");
+    
     stream.submit(
-      { messages: [...toolMessages, newHumanMessage], context },
+      { 
+        messages: [...toolMessages, newHumanMessage], 
+        context,
+      },
       {
         streamMode: ["values"],
         optimisticValues: (prev) => ({

@@ -9,6 +9,14 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 
+class FlightLoyaltyProgramme(BaseModel):
+    """Flight Loyalty Programme information."""
+    reference: str = Field(..., description="The reference of this loyalty programme.")
+    name: str = Field(..., description="The name of the loyalty programme.")
+    logo_url_svg: Optional[str] = Field(None, description="The URL of the loyalty programme's SVG logo.")
+    logo_url_png_small: Optional[str] = Field(None, description="The URL of the loyalty programme's PNG logo (small).")
+
+
 class FlightSegment(BaseModel):
     """Represents a flight segment."""
     origin: str = Field(..., description="Origin airport code")
@@ -33,6 +41,8 @@ class FlightOffer(BaseModel):
     cabin_class: str = Field(..., description="Cabin class")
     refundable: bool = Field(False, description="Whether the ticket is refundable")
     baggage_included: bool = Field(False, description="Whether baggage is included")
+    supported_loyalty_programmes: Optional[List[str]] = Field(None, description="List of supported loyalty programme references")
+
 
 class FlightSearchRequest(BaseModel):
     """Request model for flight search."""
@@ -77,39 +87,25 @@ class FlightSearchResponse(BaseModel):
                     "passenger_ids": offer.get("passenger_ids", []),
                 }
             else:
-                # Handle FlightOffer objects (if you use them)
-                # You may want to add similar multi-slice logic here if needed
+                # Handle FlightOffer objects
                 flight_data = {
                     "offer_id": offer.id,
-                    "airline": getattr(offer, "airline", "Unknown"),
-                    "price": getattr(offer, "price", "Unknown"),
-                    "slices": [
-                        {
-                            "leg": idx + 1,
-                            "origin": seg.origin,
-                            "destination": seg.destination,
-                            "departure_time": seg.departure_time,
-                            "arrival_time": seg.arrival_time,
-                            "flight_number": seg.flight_number,
-                            "cabin": seg.cabin_class,
-                        }
-                        for idx, seg in enumerate(getattr(offer, "segments", []))
-                    ],
+                    "airline": "Unknown",  # Would need to extract from segments
+                    "price": f"{offer.price} {offer.currency}",
+                    "slices": [],  # Would need to convert segments to slices format
+                    "instant_payment": "N/A",
+                    "loyalty": ", ".join(offer.supported_loyalty_programmes) if offer.supported_loyalty_programmes else "N/A",
+                    "total_journey_duration": offer.total_duration,
+                    "layovers": [],
+                    "passenger_ids": [],
                 }
             flights.append(flight_data)
-
+        
         return {
             "flights": flights,
             "total_results": self.total_results,
-            "search_id": self.search_id,
-            "search_summary": {
-                "origin": "Unknown",
-                "destination": "Unknown",
-                "departure_date": "Unknown",
-                "return_date": None,
-                "passengers": 1
-            }
-        } 
+            "search_id": self.search_id
+        }
 
 # --- Order Change Models ---
 class OrderChangeRequest(BaseModel):
@@ -147,3 +143,17 @@ class OrderChange(BaseModel):
     order_id: str = Field(..., description="Order ID")
     status: str = Field(..., description="Status of the change")
     # Add more fields as needed 
+
+
+class BaggageService(BaseModel):
+    """Baggage service information."""
+    id: str = Field(..., description="Service ID")
+    type: str = Field(..., description="Service type (should be 'baggage')")
+    name: str = Field(..., description="Service name")
+    description: Optional[str] = Field(None, description="Service description")
+    price: Optional[str] = Field(None, description="Service price")
+    currency: Optional[str] = Field(None, description="Currency code")
+    quantity: Optional[int] = Field(None, description="Quantity available")
+    weight: Optional[str] = Field(None, description="Weight limit")
+    dimensions: Optional[str] = Field(None, description="Dimension limits")
+    passenger_ids: Optional[List[str]] = Field(None, description="Applicable passenger IDs") 

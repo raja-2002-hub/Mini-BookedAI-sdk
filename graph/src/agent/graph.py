@@ -1,10 +1,12 @@
 """
 LangGraph Agent for BookedAI
 """
-from typing import Annotated, List, Dict, Any, Sequence, Optional
+from typing import Annotated, List, Dict, Any, Sequence, Optional, Deque
 from typing_extensions import TypedDict
 import os
+from collections import deque
 import logging
+import asyncio
 from datetime import date, datetime
 import phonenumbers
 from phonenumbers.phonenumberutil import NumberParseException
@@ -24,7 +26,7 @@ except ImportError:
 import json
 
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage, SystemMessage, AIMessage
 from langchain_core.tools import tool
 from pydantic import SecretStr
 
@@ -35,12 +37,14 @@ from langgraph.prebuilt import ToolNode
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from typing import Literal
+from langgraph.checkpoint.memory import MemorySaver
 
 # Import our Duffel client
 from src.duffel_client.endpoints.stays import search_hotels, fetch_hotel_rates, create_quote, create_booking, cancel_hotel_booking, update_hotel_booking
 from src.duffel_client.endpoints.flights import search_flights, format_flights_markdown, get_seat_maps,fetch_flight_offer, create_flight_booking, list_airline_initiated_changes, update_airline_initiated_change, accept_airline_initiated_change
 from src.duffel_client.client import DuffelAPIError
 from src.config import config
+
 
 # --- Flight Order Change Tools ---
 from src.duffel_client.endpoints.flights import (
@@ -63,12 +67,18 @@ from src.duffel_client.endpoints.payments import (
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+
+
+
 TOOL_UI_MAPPING = {
     "search_hotels_tool": "hotelResults",
     "search_flights_tool": "flightResults",
     "flight_payment_sequence_tool": "paymentForm",
     "hotel_payment_sequence_tool": "paymentForm"
 }
+
+# Module-level scratchpad for recent user texts (set by context preparation)
+LAST_USER_TEXTS: Deque[str] = deque(maxlen=5)
 
 # Log UI-related imports and configurations
 logger.info(f"[MODULE INIT] TOOL_UI_MAPPING loaded: {TOOL_UI_MAPPING}")
@@ -87,7 +97,10 @@ class AgentState(TypedDict):
     booking_intent: Optional[bool]
     current_agent: Optional[str]    
 
-def parse_and_normalize_date(input_date: str) -> str:
+
+
+
+async def parse_and_normalize_date(input_date: str) -> str:
     """
     Parse a date string using dateparser and ensure it is in the future.
     If the date is in the past (even after rolling to this year), keep rolling forward to the next year until it is in the future.
@@ -97,10 +110,14 @@ def parse_and_normalize_date(input_date: str) -> str:
     try:
         logger.info(f"[DEBUG] parse_and_normalize_date called with input: {input_date}")
         
-        # First try to parse with dateparser
+        # First try to parse with dateparser (offload to thread to avoid blocking event loop)
         dt = None
         try:
-            dt = dateparser.parse(input_date, settings={'PREFER_DATES_FROM': 'future'})
+            dt = await asyncio.to_thread(
+                dateparser.parse,
+                input_date,
+                settings={'PREFER_DATES_FROM': 'future'}
+            )
         except Exception as parse_error:
             logger.info(f"[DEBUG] dateparser.parse failed: {parse_error}")
         
@@ -167,15 +184,7 @@ def calculate_simple_math(expression: str) -> str:
         return f"Error calculating expression: {str(e)}"
 
 
-@tool
-def search_web(query: str) -> str:
-    """Search the web for information. This is a mock tool for demonstration."""
-    logger.debug(f"search_web tool called with query: {query}")
-    # This is a mock implementation - in a real scenario you'd integrate with a search API
-    logger.info(f"Performing mock web search for: {query}")
-    result = f"Mock search results for: {query}. This would normally return real web search results."
-    logger.debug("Mock web search completed")
-    return result
+ 
 
 @tool
 async def validate_phone_number_tool(phone: str) -> str:
@@ -215,8 +224,8 @@ async def validate_phone_number_tool(phone: str) -> str:
 
         formatted_number = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
         
-        # Return confirmation message with country detection
-        return f"CONFIRMATION NEEDED: I detected you're in {country_name}. Is your phone number {formatted_number}? Please respond with 'yes' or 'no'."
+        # Return validated phone number without confirmation
+        return f"Valid phone number: {formatted_number} (detected country: {country_name})"
         
     except NumberParseException as e:
         return f"Error: Invalid phone number: {e}"
@@ -451,8 +460,8 @@ async def search_flights_tool(
         for seg in slices:
             if not all(k in seg for k in ("origin", "destination", "departure_date")):
                 return "Error: Each slice must have 'origin', 'destination', and 'departure_date'."
-            # Normalize the departure_date
-            seg["departure_date"] = parse_and_normalize_date(seg["departure_date"])
+            # Normalize the departure_date (async)
+            seg["departure_date"] = await parse_and_normalize_date(seg["departure_date"])
             # Date validation
             try:
                 dep_date = datetime.strptime(seg["departure_date"], "%Y-%m-%d").date()
@@ -516,9 +525,9 @@ async def search_hotels_tool(
             adults = 1
         if children is None:
             children = 0
-        # Validate date format and parse dates
-        check_in_date = parse_and_normalize_date(check_in_date)
-        check_out_date = parse_and_normalize_date(check_out_date)
+        # Validate date format and parse dates (async)
+        check_in_date = await parse_and_normalize_date(check_in_date)
+        check_out_date = await parse_and_normalize_date(check_out_date)
         logger.debug (f"Normalized dates - Check-in: {check_in_date}, Check-out: {check_out_date}")
         try:
             check_in = datetime.strptime(check_in_date, "%Y-%m-%d").date()
@@ -795,10 +804,48 @@ async def fetch_flight_quote_tool(offer_id: str) -> str:
         return f"Unexpected error during quote fetch: {exc}"
 
 @tool
+async def validate_offer_tool(offer_id: str) -> str:
+    """
+    Validate if a flight offer is still available for booking.
+    This helps prevent booking errors by checking offer status before attempting to book.
+    """
+    try:
+        from src.duffel_client.endpoints.flights import fetch_flight_offer
+        offer = await fetch_flight_offer(offer_id)
+        
+        # Check if offer is still valid
+        if offer and 'data' in offer:
+            offer_data = offer['data']
+            return json.dumps({
+                "valid": True,
+                "offer_id": offer_id,
+                "airline": offer_data.get('owner', {}).get('name', 'Unknown'),
+                "price": offer_data.get('total_amount'),
+                "currency": offer_data.get('total_currency'),
+                "message": "Offer is valid and available for booking"
+            })
+        else:
+            return json.dumps({
+                "valid": False,
+                "offer_id": offer_id,
+                "message": "Offer not found or no longer available"
+            })
+    except Exception as e:
+        logger.error(f"Error validating offer: {e}")
+        return json.dumps({
+            "valid": False,
+            "offer_id": offer_id,
+            "message": f"Error validating offer: {str(e)[:50]}"
+        })
+
+@tool
 async def create_flight_booking_tool(
     offer_id: str,
     passengers: list,
     payments: list,
+    services: list = None,
+    loyalty_programme_reference: str = "",
+    loyalty_account_number: str = "",
     **kwargs
 ) -> str:
     """
@@ -840,9 +887,35 @@ async def create_flight_booking_tool(
             return f"Error tokenising card: {tok_err}"
     
     try:
-        response = await create_flight_booking(offer_id, passengers, payments)
+        # First, refresh the offer to ensure it's still valid and get fresh passenger IDs
+        logger.info(f"Refreshing offer {offer_id} before booking")
+        refreshed_offer = await fetch_flight_offer(offer_id)
+        
+        if not refreshed_offer or 'data' not in refreshed_offer:
+            return "Error: Offer is no longer available. Please search for flights again."
+        
+        # Update passenger IDs with fresh ones from the refreshed offer
+        refreshed_passengers = refreshed_offer['data'].get('passengers', [])
+        if len(refreshed_passengers) != len(passengers):
+            return "Error: Number of passengers doesn't match the offer. Please refresh your search."
+        
+        # Update passenger IDs with fresh ones
+        for i, passenger in enumerate(passengers):
+            if i < len(refreshed_passengers):
+                passenger['id'] = refreshed_passengers[i]['id']
+        
+        # Now attempt the booking with fresh offer data
+        response = await create_flight_booking(
+            offer_id, 
+            passengers, 
+            payments, 
+            loyalty_programme_reference=loyalty_programme_reference,
+            loyalty_account_number=loyalty_account_number,
+            services=services
+        )
         logger.info("Booking created successfully")
         return json.dumps(response)
+        
     except Exception as exc:
         logger.error(f"Booking creation failed: {exc}")
         return f"Booking creation failed: {str(exc)}"
@@ -1386,6 +1459,38 @@ async def cancel_hotel_booking_tool(booking_id: str) -> str:
         return json.dumps({"error": f"Unexpected error: {str(e)}"})
 
 @tool
+async def list_loyalty_programmes_tool() -> str:
+    """List all loyalty programmes supported by Duffel Stays."""
+    try:
+        from src.duffel_client.endpoints.stays import fetch_loyalty_programmes
+        loyalty_programmes = await fetch_loyalty_programmes()
+        
+        if loyalty_programmes:
+            result = "Supported loyalty programmes:\n"
+            for i, programme in enumerate(loyalty_programmes[:10], 1):  # Limit to 10
+                result += f"{i}. {programme.name} (Reference: {programme.reference})\n"
+            return result
+        else:
+            return "No loyalty programmes found or error fetching programmes"
+    except Exception as e:
+        logger.error(f"Error listing loyalty programmes: {e}")
+        return f"Error listing loyalty programmes: {str(e)[:50]}"
+
+@tool
+async def list_flight_loyalty_programmes_tool() -> str:
+    """
+    List all loyalty programmes supported by Duffel Flights.
+    
+    Use this tool when the user asks about loyalty programs, frequent flyer programs, or when you want to offer loyalty program options during flight booking. This helps users earn points and miles on their flights.
+    """
+    try:
+        # This would need to be implemented based on your flight loyalty API
+        return "Flight loyalty programmes: American Airlines AAdvantage, Delta SkyMiles, United MileagePlus, etc."
+    except Exception as e:
+        logger.error(f"Error listing flight loyalty programmes: {e}")
+        return f"Error listing flight loyalty programmes: {str(e)[:50]}"
+
+@tool
 async def update_hotel_booking_tool(
     booking_id: str, 
     email: str = None,
@@ -1414,6 +1519,71 @@ async def update_hotel_booking_tool(
     except Exception as e:
         return json.dumps({"error": f"Unexpected error: {str(e)}"})
 
+
+@tool
+async def fetch_extra_baggage_options_tool(offer_id: str) -> str:
+    """Fetch extra baggage options for a flight offer."""
+    try:
+        from src.duffel_client.endpoints.flights import get_available_services
+        services = await get_available_services(offer_id)
+        
+        # Extract and format baggage-related services
+        baggage_options = []
+        if isinstance(services, dict) and 'data' in services:
+            available_services = services.get('data', {}).get('available_services', [])
+            for service in available_services:
+                service_type = service.get('type', '')
+                if 'baggage' in service_type.lower() or 'luggage' in service_type.lower():
+                    baggage_options.append({
+                        'id': service.get('id'),
+                        'type': service.get('type'),
+                        'name': service.get('metadata', {}).get('name', ''),
+                        'description': service.get('metadata', {}).get('description', ''),
+                        'price': service.get('total_amount'),
+                        'currency': service.get('total_currency')
+                    })
+        
+        if baggage_options:
+            return json.dumps({
+                'baggage_options': baggage_options,
+                'message': f'Found {len(baggage_options)} extra baggage options. To add baggage to your booking, include the selected services in the create_flight_booking_tool call with the services parameter.',
+                'usage_note': 'When booking, pass selected baggage services as: [{"id": "service_id", "passenger_ids": ["passenger_id"], "quantity": 1}]'
+            })
+        else:
+            return json.dumps({
+                'baggage_options': [],
+                'message': 'No additional baggage options available for this flight'
+            })
+            
+    except Exception as e:
+        logger.error(f"Error fetching baggage options: {e}")
+        return f"Error fetching baggage options: {str(e)[:50]}"
+
+
+
+
+
+@tool
+async def get_available_services_tool(offer_id: str) -> str:
+    """Get available services for a flight offer."""
+    try:
+        from src.duffel_client.endpoints.flights import get_available_services
+        services = await get_available_services(offer_id)
+        return json.dumps(services)
+    except Exception as e:
+        logger.error(f"Error fetching available services: {e}")
+        return f"Error fetching available services: {str(e)[:50]}"
+
+@tool
+async def fetch_accommodation_reviews_tool(accommodation_id: str, limit: int = 5) -> str:
+    """Fetch reviews for an accommodation."""
+    try:
+        from src.duffel_client.endpoints.stays import fetch_accommodation_reviews
+        reviews = await fetch_accommodation_reviews(accommodation_id, limit)
+        return json.dumps(reviews)
+    except Exception as e:
+        logger.error(f"Error fetching accommodation reviews: {e}")
+        return f"Error fetching accommodation reviews: {str(e)[:50]}"
 
 @tool
 async def change_flight_booking_tool(
@@ -1584,7 +1754,6 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
     tools = [
         get_current_time,
         calculate_simple_math,
-        search_web,
         validate_phone_number_tool,
         search_flights_tool,
         search_hotels_tool,
@@ -1601,7 +1770,12 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
         update_hotel_booking_tool,
         pay_later_tool,
         flight_payment_sequence_tool,
-        hotel_payment_sequence_tool
+        hotel_payment_sequence_tool,
+        list_loyalty_programmes_tool,
+        list_flight_loyalty_programmes_tool,
+        fetch_extra_baggage_options_tool,
+        get_available_services_tool,
+        fetch_accommodation_reviews_tool,
     ]
     llm_with_tools = llm.bind_tools(tools)
     
@@ -1612,7 +1786,7 @@ You are a helpful AI assistant for BookedAI, specializing in travel assistance
 </identity>
 
 <instructions>
-Help the user with their travel plans.
+Help the user with their travel plans in a conversational, personal way.
 </instructions>
 
 <rules>
@@ -1781,6 +1955,8 @@ def human_input_node(state: AgentState) -> Dict[str, Any]:
     raise GraphInterrupt("Please provide additional input or guidance for the agent.")
 
 
+ # context_preparation node removed
+
 def should_continue(state: AgentState) -> str:
     """Determine if the agent should continue or end."""
     logger.debug("Evaluating should_continue condition")
@@ -1811,7 +1987,6 @@ def create_graph():
         tools = [
             get_current_time,
             calculate_simple_math,
-            search_web,
             validate_phone_number_tool,
             search_flights_tool,
             search_hotels_tool,
@@ -1828,7 +2003,12 @@ def create_graph():
             update_hotel_booking_tool,
             pay_later_tool,
             flight_payment_sequence_tool,
-            hotel_payment_sequence_tool
+            hotel_payment_sequence_tool,
+            list_loyalty_programmes_tool,
+            list_flight_loyalty_programmes_tool,
+            fetch_extra_baggage_options_tool,
+            get_available_services_tool,
+            fetch_accommodation_reviews_tool,
         ]
         logger.debug(f"Initializing ToolNode with {len(tools)} tools: {[tool.name for tool in tools]}")
         tool_node = ToolNode(tools)
@@ -1877,7 +2057,7 @@ def create_graph():
 
     except Exception as e:
         logger.error(f"Error creating graph: {str(e)}", exc_info=True)
-        raise   
+        raise
 
 
 # Export the compiled graph

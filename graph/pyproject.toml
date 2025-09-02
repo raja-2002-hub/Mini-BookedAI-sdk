@@ -15,6 +15,10 @@ dependencies = [
     "pydantic>=2.0.0",
     "geopy>=2.4.1",
     "phonenumbers>=8.13.32",
-    "isodate>=0.6.1", 
-    "dateparser>=1.2.0"
+    "isodate>=0.6.1",
+    "dateparser>=1.2.0",
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.1.0",
 ]
+
+

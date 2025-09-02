@@ -26,6 +26,7 @@ import { getApiKey } from "@/lib/api-key";
 import { useThreads } from "./Thread";
 import { toast } from "sonner";
 
+
 export type StateType = { messages: Message[]; ui?: UIMessage[] };
 
 const useTypedStream = useStream<
@@ -72,19 +73,25 @@ const StreamSession = ({
   apiKey,
   apiUrl,
   assistantId,
+  currentUser,
 }: {
   children: ReactNode;
   apiKey: string | null;
   apiUrl: string;
   assistantId: string;
+  currentUser: any | null;
 }) => {
   const [threadId, setThreadId] = useQueryState("threadId");
   const { getThreads, setThreads } = useThreads();
   const streamValue = useTypedStream({
-    apiUrl,
+    apiUrl: apiUrl.replace('/api', '/api/custom-passthrough'), // Use custom passthrough
     apiKey: apiKey ?? undefined,
     assistantId,
     threadId: threadId ?? null,
+    defaultHeaders: currentUser ? {
+      "X-User-ID": currentUser.uid,
+      "X-User-Email": currentUser.email || currentUser.uid,
+    } : undefined,
     onCustomEvent: (event, options) => {
       console.log("[STREAM] Custom event received:", event);
       
@@ -141,8 +148,12 @@ const StreamSession = ({
 const DEFAULT_API_URL = "http://localhost:2024";
 const DEFAULT_ASSISTANT_ID = "agent";
 
-export const StreamProvider: React.FC<{ children: ReactNode }> = ({
+export const StreamProvider: React.FC<{ 
+  children: ReactNode;
+  currentUser?: any | null;
+}> = ({
   children,
+  currentUser,
 }) => {
   // Get environment variables
   const envApiUrl: string | undefined = process.env.NEXT_PUBLIC_API_URL;
@@ -279,6 +290,7 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
       apiKey={apiKey}
       apiUrl={apiUrl}
       assistantId={assistantId}
+      currentUser={currentUser || null}
     >
       {children}
     </StreamSession>

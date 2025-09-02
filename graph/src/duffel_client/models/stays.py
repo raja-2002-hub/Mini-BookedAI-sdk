@@ -16,6 +16,14 @@ class Amenity(BaseModel):
     category: Optional[str] = Field(None, description="Amenity category")
 
 
+class LoyaltyProgramme(BaseModel):
+    """Accommodation Loyalty Programme information."""
+    reference: str = Field(..., description="The reference of this loyalty programme.")
+    name: str = Field(..., description="The name of the loyalty programme.")
+    logo_url_svg: Optional[str] = Field(None, description="The URL of the loyalty programme's SVG logo.")
+    logo_url_png_small: Optional[str] = Field(None, description="The URL of the loyalty programme's PNG logo.")
+
+
 class Rate(BaseModel):
     """Hotel room rate information."""
     total_amount: Money = Field(..., description="Total amount for the stay")
@@ -66,6 +74,7 @@ class Hotel(BaseModel):
     images: Optional[List[str]] = Field(None, description="Hotel image URLs")
     
     rooms: List[Room] = Field(..., description="Available rooms")
+    loyalty_programmes: Optional[List[LoyaltyProgramme]] = Field(None, description="Supported loyalty programmes")
     
     @property
     def min_rate(self) -> Optional[Rate]:
@@ -78,6 +87,13 @@ class Hotel(BaseModel):
         rating = f" ({self.star_rating}★)" if self.star_rating else ""
         location = f" - {self.address.city}" if self.address and self.address.city else ""
         return f"{self.name}{rating}{location}"
+
+
+class AccommodationReview(BaseModel):
+    text: str
+    score: float
+    reviewer_name: str
+    created_at: str
 
 
 class HotelSearchRequest(BaseModel):
@@ -173,6 +189,19 @@ class HotelSearchResponse(DuffelResponse):
             # Get first image
             image = hotel.images[0] if hotel.images else ""
             
+            # Get loyalty programmes
+            loyalty_programmes = [lp.dict() for lp in hotel.loyalty_programmes] if hotel.loyalty_programmes else []
+            
+            # Try to extract accommodation_id (acc_...) from the first room's id or from a nested property
+            accommodation_id = None
+            if hasattr(hotel, 'rooms') and hotel.rooms:
+                for room in hotel.rooms:
+                    if hasattr(room, 'id') and isinstance(room.id, str) and room.id.startswith('acc_'):
+                        accommodation_id = room.id
+                        break
+            # Fallback: try to extract acc_... from hotel.id if it matches
+            if not accommodation_id and isinstance(hotel.id, str) and hotel.id.startswith('acc_'):
+                accommodation_id = hotel.id
             hotel_data.append({
                 "name": hotel.name,
                 "rating": hotel.star_rating or 0,
@@ -181,7 +210,9 @@ class HotelSearchResponse(DuffelResponse):
                 "image": image,
                 "amenities": amenities,
                 "description": hotel.description[:100]+"..." if hotel.description else "",
-                "id": hotel.id
+                "id": hotel.id,
+                "accommodation_id": accommodation_id,
+                "loyalty_programmes": loyalty_programmes
             })
         
         return {
