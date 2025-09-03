@@ -91,7 +91,9 @@ const StreamSession = ({
         if (!res.ok) return;
         const data = await res.json();
         setClientMeta({ ip: data?.ip, country: data?.country });
-      } catch {}
+      } catch (error) {
+        console.warn("Failed to fetch client metadata:", error);
+      }
     })();
   }, []);
   const streamValue = useTypedStream({
