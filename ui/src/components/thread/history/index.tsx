@@ -82,23 +82,17 @@ export default function ThreadHistory() {
     parseAsBoolean.withDefault(false),
   );
 
-  const { getThreads, threads, setThreads, threadsLoading, setThreadsLoading, currentUser } =
+  const { getThreads, threads, setThreads, threadsLoading, setThreadsLoading } =
     useThreads();
 
-  const [threadId, setThreadId] = useQueryState("threadId");
-
   useEffect(() => {
-    if (typeof window === "undefined" || !currentUser) return;
-    
-    // Always clear the current thread ID when user changes to prevent showing other user's conversations
-    setThreadId(null);
-    
+    if (typeof window === "undefined") return;
     setThreadsLoading(true);
     getThreads()
       .then(setThreads)
       .catch(console.error)
       .finally(() => setThreadsLoading(false));
-  }, [currentUser, getThreads, setThreadId]);
+  }, []);
 
   return (
     <>
@@ -119,16 +113,8 @@ export default function ThreadHistory() {
             Thread History
           </h1>
         </div>
-        {!currentUser ? (
-          <div className="flex w-full items-center justify-center p-4 text-sm text-gray-500">
-            Please sign in to view chat history
-          </div>
-        ) : threadsLoading ? (
+        {threadsLoading ? (
           <ThreadHistoryLoading />
-        ) : threads.length === 0 ? (
-          <div className="flex w-full items-center justify-center p-4 text-sm text-gray-500">
-            No chat history yet. Start a new conversation!
-          </div>
         ) : (
           <ThreadList threads={threads} />
         )}
@@ -148,22 +134,10 @@ export default function ThreadHistory() {
             <SheetHeader>
               <SheetTitle>Thread History</SheetTitle>
             </SheetHeader>
-            {!currentUser ? (
-              <div className="flex w-full items-center justify-center p-4 text-sm text-gray-500">
-                Please sign in to view chat history
-              </div>
-            ) : threadsLoading ? (
-              <ThreadHistoryLoading />
-            ) : threads.length === 0 ? (
-              <div className="flex w-full items-center justify-center p-4 text-sm text-gray-500">
-                No chat history yet. Start a new conversation!
-              </div>
-            ) : (
-              <ThreadList
-                threads={threads}
-                onThreadClick={() => setChatHistoryOpen((o) => !o)}
-              />
-            )}
+            <ThreadList
+              threads={threads}
+              onThreadClick={() => setChatHistoryOpen((o) => !o)}
+            />
           </SheetContent>
         </Sheet>
       </div>

@@ -9,5 +9,14 @@ export const { GET, POST, PUT, PATCH, DELETE, OPTIONS, runtime } =
     apiKey: process.env.LANGSMITH_API_KEY ?? "remove-me", // default, if not defined it will attempt to read process.env.LANGSMITH_API_KEY
     runtime: "edge", // default
     // Forward custom headers
-    forwardHeaders: ["X-User-ID", "X-User-Email"],
+    forwardHeaders: [
+      "X-User-ID",
+      "X-User-Email",
+      "X-Client-IP",
+      "X-Client-Country",
+      // Common proxy client IP headers (in case your deployment sets them)
+      "x-forwarded-for",
+      "x-real-ip",
+      "cf-connecting-ip",
+    ],
   });

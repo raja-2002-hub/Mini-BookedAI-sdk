@@ -187,7 +187,7 @@ def calculate_simple_math(expression: str) -> str:
  
 
 @tool
-async def validate_phone_number_tool(phone: str) -> str:
+async def validate_phone_number_tool(phone: str, client_country: str | None = None) -> str:
     """
     Validates a phone number using automatic IP-based region detection and asks for confirmation.
     If the phone starts with '+', no region is needed.
@@ -200,24 +200,21 @@ async def validate_phone_number_tool(phone: str) -> str:
             parsed = phonenumbers.parse(phone, None)
             country_name = "Unknown"
         else:
-            # Automatically detect user's country from IP
+            # Require client-provided country (from browser). Do not use server IP geolocation in production.
+            if not client_country or not isinstance(client_country, str):
+                return (
+                    "Error: Could not determine your country automatically. "
+                    "Please enter the phone with +<country_code> (e.g., +1..., +44...)."
+                )
+            region = client_country.strip().upper()[:2]
+            country_name = region
             try:
-                async with httpx.AsyncClient() as client:
-                    # Get user's IP address automatically
-                    ip_response = await client.get("https://api.ipify.org?format=json")
-                    user_ip = ip_response.json().get("ip")
-                    
-                    # Get country from IP
-                    geo_response = await client.get(f"https://ipapi.co/{user_ip}/json/")
-                    region = geo_response.json().get("country")
-                    country_name = geo_response.json().get("country_name", "Unknown")
-                    
-                    if not region:
-                        return "Error: Could not detect your country automatically. Please provide phone number with country code (e.g., +1 for US, +44 for UK)"
-                    
-                    parsed = phonenumbers.parse(phone, region)
+                parsed = phonenumbers.parse(phone, region)
             except Exception as e:
-                return f"Error: Could not detect your country automatically. Please provide phone number with country code (e.g., +1 for US, +44 for UK). Error: {str(e)}"
+                return (
+                    "Error: Please include your country code (e.g., +1 for US, +44 for UK). "
+                    f"Parsing failed with region {region}: {str(e)}"
+                )
 
         if not phonenumbers.is_valid_number(parsed):
             return "Error: Invalid phone number"
@@ -225,7 +222,7 @@ async def validate_phone_number_tool(phone: str) -> str:
         formatted_number = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
         
         # Return validated phone number without confirmation
-        return f"Valid phone number: {formatted_number} (detected country: {country_name})"
+        return f"Valid phone number: {formatted_number} (region: {country_name})"
         
     except NumberParseException as e:
         return f"Error: Invalid phone number: {e}"

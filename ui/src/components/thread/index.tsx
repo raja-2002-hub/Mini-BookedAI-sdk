@@ -120,7 +120,6 @@ export function Thread() {
   const isLargeScreen = useMediaQuery("(min-width: 1024px)");
 
   const stream = useStreamContext();
-  const { currentUser } = useThreads();
   const messages = stream.messages;
   const isLoading = stream.isLoading;
 
@@ -196,17 +195,9 @@ export function Thread() {
     const context =
       Object.keys(artifactContext).length > 0 ? artifactContext : undefined;
 
-    console.log("[THREAD SUBMIT] Submitting with user:", currentUser?.uid, currentUser?.email);
-    console.log("[THREAD SUBMIT] Headers being sent:", currentUser ? {
-      "X-User-ID": currentUser.uid,
-      "X-User-Email": currentUser.email || currentUser.uid,
-    } : "No user");
     
     stream.submit(
-      { 
-        messages: [...toolMessages, newHumanMessage], 
-        context,
-      },
+      { messages: [...toolMessages, newHumanMessage], context },
       {
         streamMode: ["values"],
         optimisticValues: (prev) => ({
