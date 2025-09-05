@@ -37,7 +37,7 @@ from langgraph.types import Command
 from typing import Literal
 
 # Import our Duffel client
-from src.duffel_client.endpoints.stays import search_hotels, fetch_hotel_rates, create_quote, create_booking, cancel_hotel_booking, update_hotel_booking
+from src.duffel_client.endpoints.stays import search_hotels, fetch_hotel_rates, create_quote, create_booking, cancel_hotel_booking, update_hotel_booking, extend_hotel_stay
 from src.duffel_client.endpoints.flights import search_flights, format_flights_markdown, get_seat_maps,fetch_flight_offer, create_flight_booking, list_airline_initiated_changes, update_airline_initiated_change, accept_airline_initiated_change
 from src.duffel_client.client import DuffelAPIError
 from src.config import config
@@ -67,7 +67,8 @@ TOOL_UI_MAPPING = {
     "search_hotels_tool": "hotelResults",
     "search_flights_tool": "flightResults",
     "flight_payment_sequence_tool": "paymentForm",
-    "hotel_payment_sequence_tool": "paymentForm"
+    "hotel_payment_sequence_tool": "paymentForm",
+    "extend_hotel_stay_tool": "paymentForm"
 }
 
 # Log UI-related imports and configurations
@@ -848,6 +849,93 @@ async def create_flight_booking_tool(
         return f"Booking creation failed: {str(exc)}"
     
 @tool
+async def extend_hotel_stay_tool(
+    booking_id: str,
+    check_in_date: str,
+    check_out_date: str,
+    preferred_rate_id: Optional[str] = None,
+    customer_confirmation: bool = False,
+    payment: Optional[Dict[str, Any]] = None
+) -> str:
+    """
+    Extend a hotel booking's stay dates by cancelling the existing booking and creating a new one.
+
+    Use this tool when the user wants to extend their hotel stay (e.g., change check-in or check-out date).
+    This tool will:
+    1. Fetch existing booking details
+    2. Search for availability for the new dates
+    3. Fetch detailed rates
+    4. Return cost change for confirmation (if customer_confirmation=False)
+    5. Return payment form if no payment provided
+    6. Cancel the original booking and create a new one (if customer_confirmation=True and payment provided)
+
+    Args:
+        booking_id: The ID of the booking to extend (e.g., "bok_0000AxNtHvxFHgcXbJQFW4").
+        check_in_date: The new check-in date in natural language or YYYY-MM-DD (e.g., "2025-09-14").
+        check_out_date: The new check-out date in natural language or YYYY-MM-DD (e.g., "2025-09-16").
+        preferred_rate_id: Optional rate ID to use (e.g., "rat_0000AxOD48JMHJGKwszWYI").
+        customer_confirmation: If False, returns cost change; if True, proceeds.
+        payment: Optional payment details (e.g., {"type": "balance"} or card details).
+
+    Returns:
+        JSON string with booking ID, cost change, payment form, or error message.
+    """
+    logger.info(f"Extend hotel stay initiated for booking: {booking_id}, check-in: {check_in_date}, check-out: {check_out_date}")
+    try:
+        # Normalize dates
+        check_in_date = parse_and_normalize_date(check_in_date)
+        check_out_date = parse_and_normalize_date(check_out_date)
+        logger.debug(f"Normalized dates - Check-in: {check_in_date}, Check-out: {check_out_date}")
+
+        # Validate dates
+        check_in = datetime.strptime(check_in_date, "%Y-%m-%d").date()
+        check_out = datetime.strptime(check_out_date, "%Y-%m-%d").date()
+        if check_out <= check_in:
+            return json.dumps({"error": "Check-out date must be after check-in date"})
+        if check_in < date.today():
+            return json.dumps({"error": "Check-in date cannot be in the past"})
+
+        # Validate booking_id
+        if not booking_id or not booking_id.startswith("bok_"):
+            return json.dumps({"error": "Invalid booking_id, must start with 'bok_'"})
+
+        # Check API token
+        if not config.DUFFEL_API_TOKEN:
+            logger.error("Duffel API token not configured")
+            return json.dumps({"error": "Hotel stay extension unavailable: Duffel API token not configured"})
+        
+        logger.info(f"Fetching existing booking details:{booking_id}")
+
+        # Call the stays endpoint
+        response = await extend_hotel_stay(
+            booking_id, check_in_date, check_out_date, preferred_rate_id, customer_confirmation, payment
+        )
+        logger.info(f"Extend hotel stay completed for booking: {booking_id}")
+        return json.dumps(response)
+
+    except GraphInterrupt as gi:
+        # Propagate interruption for human input
+        logger.info(f"GraphInterrupt caught: {gi}")
+        raise
+
+    except DuffelAPIError as e:
+        logger.error(f"Duffel API error during hotel stay extension: {e}")
+        error_title = "API Error"
+        error_detail = "Please try again later"
+        if hasattr(e, "error"):
+            if isinstance(e.error, dict):
+                error_title = e.error.get("title", error_title)
+                error_detail = e.error.get("detail", error_detail)
+            else:
+                error_title = str(e.error) if e.error else "API Error"
+        error_response = {"error": f"{error_title} - {error_detail}"}
+        return json.dumps(error_response)
+    except Exception as e:
+        logger.error(f"Unexpected error during hotel stay extension: {str(e)}")
+        error_response = {"error": f"Unexpected error: {str(e)}"}
+        return json.dumps(error_response)
+    
+@tool
 async def get_seat_maps_tool(offer_id: str) -> str:
     """
     Retrieve seat maps for a given flight offer.
@@ -1524,6 +1612,20 @@ def should_push_ui_message(tool_message: ToolMessage, tool_data: Dict[str, Any])
             if tool_data.get("status") == "need_payment_info":
                 logger.info(f"[UI PUSH] ✓ Payment form needed (explicit request)")
                 return True, "paymentForm"
+            
+    if tool_name == "extend_hotel_stay_tool":
+        logger.info(f"[UI PUSH] Processing extend_hotel_stay_tool")
+        if isinstance(tool_data, dict):
+            # Handle confirmation text
+            if "message" in tool_data and "rates" in tool_data:
+                logger.info(f"[UI PUSH] ✓ Returning confirmation text")
+                return True, None  # Return text without specific UI type
+            # Only push payment form if payment is not provided and status isn't success
+            if tool_data.get("payment_provided", False) or tool_data.get("status") == "success":
+                logger.info(f"[UI PUSH] ✗ Payment provided or success status, skipping payment form")
+                return False, None
+            logger.info(f"[UI PUSH] ✓ Payment form needed (no payment provided)")
+            return True, "paymentForm"
     
     # Tool-specific logic
     if tool_name == "search_hotels_tool":
@@ -1601,7 +1703,8 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
         update_hotel_booking_tool,
         pay_later_tool,
         flight_payment_sequence_tool,
-        hotel_payment_sequence_tool
+        hotel_payment_sequence_tool,
+        extend_hotel_stay_tool
     ]
     llm_with_tools = llm.bind_tools(tools)
     
@@ -1828,7 +1931,8 @@ def create_graph():
             update_hotel_booking_tool,
             pay_later_tool,
             flight_payment_sequence_tool,
-            hotel_payment_sequence_tool
+            hotel_payment_sequence_tool,
+            extend_hotel_stay_tool
         ]
         logger.debug(f"Initializing ToolNode with {len(tools)} tools: {[tool.name for tool in tools]}")
         tool_node = ToolNode(tools)
