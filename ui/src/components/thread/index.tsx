@@ -16,6 +16,7 @@ import {
 import { BookedLogoSVG } from "../icons/booked";
 import { TooltipIconButton } from "./tooltip-icon-button";
 import { ThemeSwitcher } from "../theme-switcher";
+import { AuthUserButton } from "../auth/user-button";
 import {
   ArrowDown,
   LoaderCircle,
@@ -304,8 +305,9 @@ export function Thread() {
                 )}
               </div>
               
-              <div className="pr-2">
+              <div className="flex items-center gap-2 pr-2">
                 <ThemeSwitcher />
+                <AuthUserButton />
               </div>
             </div>
           )}
@@ -347,6 +349,7 @@ export function Thread() {
 
               <div className="flex items-center gap-4">
                 <ThemeSwitcher />
+                <AuthUserButton />
                 <TooltipIconButton
                   size="lg"
                   className="p-4"
