@@ -5,7 +5,8 @@ import logging
 import asyncio
 import json
 from typing import List, Dict, Any, Optional
-from datetime import date
+from datetime import date, datetime, timezone
+from langgraph.errors import GraphInterrupt
 
 from geopy.geocoders import Nominatim
 
@@ -155,6 +156,352 @@ class StaysEndpoint:
             raise DuffelAPIError({
                 'type': 'client_error',
                 'title': 'Hotel booking update failed',
+                'detail': str(e)
+            })
+        
+    async def extend_hotel_stay(
+        self,
+        booking_id: str,
+        check_in_date: str,
+        check_out_date: str,
+        preferred_rate_id: Optional[str] = None,
+        customer_confirmation: bool = False,
+        payment: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Extend a hotel booking's stay dates by cancelling the existing booking and creating a new one.
+
+        Args:
+            booking_id: The ID of the booking to extend (e.g., "bok_0000AxNtHvxFHgcXbJQFW4").
+            check_in_date: The new check-in date in YYYY-MM-DD format (e.g., "2025-09-14").
+            check_out_date: The new check-out date in YYYY-MM-DD format (e.g., "2025-09-16").
+            preferred_rate_id: Optional rate ID to use for the new booking (e.g., "rat_0000AxOD48JMHJGKwszWYI").
+            customer_confirmation: If False, returns cost_change for confirmation; if True, proceeds.
+            payment: Optional payment details (e.g., {"type": "balance"} or card details).
+
+        Returns:
+            Dict with booking details, cost change, payment form, or error information.
+
+        Raises:
+            DuffelAPIError: For API errors.
+        """
+        try:
+            # Validate inputs
+            if not booking_id or not isinstance(booking_id, str):
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Invalid booking ID',
+                    'detail': 'Booking ID must be a non-empty string'
+                })
+            check_in = datetime.strptime(check_in_date, "%Y-%m-%d").date()
+            check_out = datetime.strptime(check_out_date, "%Y-%m-%d").date()
+            if check_out <= check_in:
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Invalid dates',
+                    'detail': 'Check-out date must be after check-in date'
+                })
+
+            # Step 1: Get existing booking details
+            booking_response = await self.client.get(f"/stays/bookings/{booking_id}")
+            booking = booking_response.get("data", {})
+            if not booking:
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Booking not found',
+                    'detail': f"Booking {booking_id} not found"
+                })
+            logger.info(f"Fetched booking details for {booking_id}")
+            logger.debug(f"Booking data: {booking}")
+
+            # Validate booking status
+            if booking.get("status") != "confirmed":
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Invalid booking status',
+                    'detail': f"Booking {booking_id} is not in confirmed status: {booking.get('status')}"
+                })
+
+            accommodation_id = booking["accommodation"]["id"]
+            rooms = booking.get("accommodation", {}).get("rooms", [])
+            if not rooms or not isinstance(rooms, list):
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Invalid booking data',
+                    'detail': 'No valid room data found in booking.accommodation.rooms'
+                })
+            if any(not room.get("rates") for room in rooms):
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Invalid booking data',
+                    'detail': 'One or more rooms have no rates'
+                })
+
+            # Validate room count
+            expected_room_count = booking.get("rooms", 0)
+            if isinstance(expected_room_count, int) and len(rooms) != expected_room_count:
+                logger.warning(f"Room count mismatch: booking.rooms={expected_room_count}, accommodation.rooms={len(rooms)}")
+
+            original_cost = sum(float(room["rates"][0]["total_amount"]) for room in rooms)
+            original_currency = rooms[0]["rates"][0]["total_currency"]
+            guest_details = booking["guests"]
+            email = booking["email"]
+            phone_number = booking["phone_number"]
+            stay_special_requests = booking.get("stay_special_requests", "")
+            original_nights = (datetime.fromisoformat(booking["check_out_date"].replace("Z", "+00:00")) -
+                            datetime.fromisoformat(booking["check_in_date"].replace("Z", "+00:00"))).days
+            
+            logger.info(f"Original booking cost: {original_cost} {original_currency} for {original_nights} nights")
+
+            # Calculate adults/children based on born_on
+            adults = 0
+            children = 0
+            child_ages = []
+            today = date.today()
+            for g in guest_details:
+                if "born_on" in g:
+                    born_date = date.fromisoformat(g["born_on"])
+                    age = (today - born_date).days // 365
+                    if age < 18:
+                        children += 1
+                        child_ages.append(age)
+                    else:
+                        adults += 1
+                else:
+                    logger.warning(f"Guest {g.get('given_name', '')} {g.get('family_name', '')} has no 'born_on' field; defaulting to adult")
+                    adults += 1
+            if adults < 1:
+                adults = 1
+
+            # Step 2: Check original cancellation timeline
+            original_cancellation_timeline = rooms[0]["rates"][0].get("cancellation_timeline", [])
+            cancel_deadline = None
+            for timeline in original_cancellation_timeline:
+                if timeline.get("refund_amount") == rooms[0]["rates"][0]["total_amount"]:
+                    cancel_deadline = datetime.fromisoformat(timeline["before"].replace("Z", "+00:00"))
+                    break
+            current_time = datetime.now(tz=cancel_deadline.tzinfo if cancel_deadline else timezone.utc)
+            if cancel_deadline and current_time > cancel_deadline:
+                raise GraphInterrupt(
+                    f"Cancellation deadline has passed for your original booking ({cancel_deadline}). "
+                    f"Do you still want to proceed with the extension (this may incur extra charges or be non-refundable)?"
+                )
+            elif not cancel_deadline:
+                logger.warning("No full refund cancellation timeline found; proceeding with potential charges")
+
+            # Step 3: Search for availability
+            guests = Guest(adults=adults, children=children, ages=child_ages)
+            address = booking["accommodation"]["location"]["address"]
+            city = address.get("city_name") or address.get("city")
+            if not city:
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Invalid booking data',
+                    'detail': 'No city found in accommodation address'
+                })
+            logger.info(f"Searching for hotels in {city} from {check_in} to {check_out} for {guests.adults} adults and {guests.children} children")
+            
+            search_response = await self.search_hotels(
+                HotelSearchRequest(
+                    location=city,
+                    dates=DateRange(check_in=check_in, check_out=check_out),
+                    guests=guests,
+                    limit=1,
+                    accommodation_ids=[accommodation_id]
+                )
+            )
+            search_result = search_response.data
+            if not search_result:
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'No availability',
+                    'detail': 'No availability found for the requested dates in this hotel'
+                })
+            search_result_id = search_result[0].id
+
+            # Step 4: Fetch detailed rates
+            logger.info(f"Fetching rates for search result {search_result_id}")
+            rates_response = await self.fetch_all_rates(search_result_id)
+            rates = rates_response.get("data", {}).get("accommodation", {}).get("rooms", [])
+            if not rates:
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'No rates available',
+                    'detail': 'No rates available for the requested dates'
+                })
+
+            # Step 5: Select a matching rate
+            logger.info(f"Selecting a suitable rate for the new dates")
+            selected_rate = None
+            rate_id_to_use = preferred_rate_id or rooms[0]["rates"][0].get("id")
+            if rate_id_to_use:
+                for room in rates:
+                    for rate in room["rates"]:
+                        if rate["id"] == rate_id_to_use:
+                            selected_rate = rate
+                            break
+                    if selected_rate:
+                        break
+
+            if not selected_rate:
+                for room in rates:
+                    for rate in room["rates"]:
+                        if (rate["board_type"] == "room_only" and
+                            rate["payment_type"] == "pay_now" and
+                            "balance" in rate["available_payment_methods"]):
+                            selected_rate = rate
+                            break
+                    if selected_rate:
+                        break
+            if not selected_rate:
+                logger.error(f"No suitable rate found. Available rates: {rates}")
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'No suitable rate',
+                    'detail': 'Could not find a suitable rate for the new dates'
+                })
+
+            # Step 6: Calculate cost change
+            logger.info(f"Selected rate {selected_rate['id']} for new booking")
+            new_cost = float(selected_rate["total_amount"])  # Single room assumption
+            new_currency = selected_rate["total_currency"]
+            new_nights = (check_out - check_in).days
+            cost_change = {
+                "original_cost": original_cost,
+                "original_currency": original_currency,
+                "original_nights": original_nights,
+                "original_per_night": original_cost / original_nights if original_nights else 0,
+                "new_cost": new_cost,
+                "new_currency": new_currency,
+                "new_nights": new_nights,
+                "new_per_night": new_cost / new_nights if new_nights else 0,
+                "rate_id": selected_rate["id"],
+                "room_name": next(room["name"] for room in rates if any(r["id"] == selected_rate["id"] for r in room["rates"])),
+                "board_type": selected_rate["board_type"],
+                "cancellation_timeline": selected_rate["cancellation_timeline"]
+            }
+
+            # Step 7: Handle confirmation
+            if not customer_confirmation:
+                logger.info("Returning cost change for confirmation")
+                return {
+                    "message": (
+                        f"Your new stay will cost {cost_change['new_cost']} {cost_change['new_currency']} "
+                        f"for {cost_change['new_nights']} nights (was {cost_change['original_cost']} {cost_change['original_currency']} "
+                        f"for {cost_change['original_nights']} nights).\n"
+                        "Do you want to proceed?"
+                    ),
+                    "rates": [
+                        {
+                            "rate_id": r["id"],
+                            "room_name": room["name"],
+                            "total_amount": r["total_amount"],
+                            "board_type": r["board_type"]
+                        }
+                        for room in rates for r in room["rates"]
+                    ]
+                }
+
+            # Step 8: Create quote
+            logger.info(f"Creating quote for rate {selected_rate['id']}")
+            quote_response = await self.create_quote(selected_rate["id"])
+            quote_id = quote_response.get("data", {}).get("id")
+            if not quote_id:
+                logger.error(f"Quote creation failed. Response: {quote_response}")
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Quote creation failed',
+                    'detail': 'Could not create quote for the selected rate'
+                })
+
+            # Step 9: Handle payment
+            if payment is None:
+                amount = quote_response.get("data", {}).get("total_amount", "0.00")
+                currency = quote_response.get("data", {}).get("total_currency", "USD")
+                return {
+                    "ui_type": "paymentForm",
+                    "data": {
+                        "title": "Complete Payment for Extended Stay",
+                        "amount": amount,
+                        "currency": currency,
+                        "fields": [
+                            {"name": "cardNumber", "label": "Card Number", "type": "text", "required": True},
+                            {"name": "expiryDate", "label": "Expiry Date", "type": "text", "required": True},
+                            {"name": "cvc", "label": "CVC", "type": "text", "required": True},
+                            {"name": "name", "label": "Cardholder Name", "type": "text", "required": True}
+                        ]
+                    },
+                    "metadata": {
+                        "guests": guest_details
+                    }
+                }
+            elif payment.get("type") not in ["balance", "card"]:
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Invalid payment',
+                    'detail': 'Payment type must be "balance" or "card"'
+                })
+            logger.info(f"Processing payment: {payment}")
+
+            # Step 10: Cancel the original booking
+            logger.info(f"Attempting to cancel booking {booking_id}")
+            cancel_response = await self.cancel_booking(booking_id)
+            if "error" in cancel_response:
+                logger.error(f"Cancellation failed. API response: {cancel_response}")
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Cancellation failed',
+                    'detail': f"Could not cancel the original booking: {cancel_response.get('error', {}).get('message', 'Unknown error')}"
+                })
+            if cancel_response.get("data", {}).get("status") != "cancelled" or not cancel_response.get("data", {}).get("cancelled_at"):
+                logger.error(f"Cancellation failed. API response: {cancel_response}")
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Cancellation failed',
+                    'detail': 'Could not confirm cancellation of the original booking'
+                })
+            logger.info(f"Successfully canceled booking {booking_id}")
+
+            # Step 11: Create the new booking
+            logger.info(f"Creating new booking with quote {quote_id}")
+            booking_body = {
+                "quote_id": quote_id,
+                "guests": guest_details,
+                "email": email,
+                "phone_number": phone_number,
+                "stay_special_requests": stay_special_requests
+                # "payment": payment
+            }
+            if booking.get("metadata"):
+                booking_body["metadata"] = booking["metadata"]
+            if booking.get("loyalty_programme_account_number"):
+                booking_body["loyalty_programme_account_number"] = booking["loyalty_programme_account_number"]
+            new_booking_response = await self.create_booking(**booking_body)
+            if "error" in new_booking_response:
+                logger.error(f"New booking creation failed. API response: {new_booking_response}")
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Booking creation failed',
+                    'detail': f"Could not create new booking: {new_booking_response.get('error', {}).get('message', 'Unknown error')}"
+                })
+            new_booking = new_booking_response.get("data", {})
+
+            return {
+                "status": "success",
+                "new_booking_id": new_booking.get("id"),
+                "cost_change": cost_change,
+                "payment_provided": True,
+                "_payment_mode": "test"
+            }
+
+        except DuffelAPIError as e:
+            logger.error(f"Duffel API error extending booking {booking_id}: {e}")
+            raise
+        except Exception as e:
+            logger.exception(f"Unexpected error extending booking {booking_id}: {e}")
+            raise DuffelAPIError({
+                'type': 'client_error',
+                'title': 'Hotel stay extension failed',
                 'detail': str(e)
             })
     
@@ -583,3 +930,19 @@ async def fetch_accommodation_reviews(accommodation_id: str, after: str = None, 
         return reviews
     except Exception as e:
         return [{"error": f"Could not fetch reviews: {str(e)}"}]
+
+async def extend_hotel_stay(
+    booking_id: str,
+    check_in_date: str,
+    check_out_date: str,
+    preferred_rate_id: Optional[str] = None,
+    customer_confirmation: bool = False,
+    payment: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Convenience function to extend a hotel booking by booking_id."""
+    from ..client import get_client
+    client = get_client()
+    stays_endpoint = StaysEndpoint(client)
+    return await stays_endpoint.extend_hotel_stay(
+        booking_id, check_in_date, check_out_date, preferred_rate_id, customer_confirmation, payment
+    )
