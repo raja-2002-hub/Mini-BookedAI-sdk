@@ -46,11 +46,10 @@ Required environment variables:
 ### 4. Run the Agent
 
 ```bash
-# Start the LangGraph development server
+# LangGraph development server
 langgraph dev
 ```
 
-This will start the LangGraph API server locally, typically on `http://localhost:2024`.
 
 ### 5. Connect to UI
 

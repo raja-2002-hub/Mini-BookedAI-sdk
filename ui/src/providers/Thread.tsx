@@ -13,6 +13,7 @@ import {
 } from "react";
 import { createClient } from "./client";
 
+
 interface ThreadContextType {
   getThreads: () => Promise<Thread[]>;
   threads: Thread[];

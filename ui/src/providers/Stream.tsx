@@ -25,6 +25,8 @@ import { PasswordInput } from "@/components/ui/password-input";
 import { getApiKey } from "@/lib/api-key";
 import { useThreads } from "./Thread";
 import { toast } from "sonner";
+import { DO_NOT_RENDER_ID_PREFIX } from "@/lib/ensure-tool-responses";
+
 
 export type StateType = { messages: Message[]; ui?: UIMessage[] };
 
@@ -80,11 +82,31 @@ const StreamSession = ({
 }) => {
   const [threadId, setThreadId] = useQueryState("threadId");
   const { getThreads, setThreads } = useThreads();
+  const [clientMeta, setClientMeta] = useState<{ ip?: string; country?: string }>({});
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("https://ipapi.co/json");
+        if (!res.ok) return;
+        const data = await res.json();
+        setClientMeta({ ip: data?.ip, country: data?.country });
+      } catch (error) {
+        console.warn("Failed to fetch client metadata:", error);
+      }
+    })();
+  }, []);
   const streamValue = useTypedStream({
     apiUrl,
     apiKey: apiKey ?? undefined,
     assistantId,
     threadId: threadId ?? null,
+    defaultHeaders: (() => {
+      const headers: Record<string, string> = {};
+      if (clientMeta.ip) headers["X-Client-IP"] = clientMeta.ip;
+      if (clientMeta.country) headers["X-Client-Country"] = clientMeta.country;
+      return Object.keys(headers).length ? headers : undefined as any;
+    })(),
     onCustomEvent: (event, options) => {
       console.log("[STREAM] Custom event received:", event);
       
@@ -112,6 +134,39 @@ const StreamSession = ({
     },
   });
 
+  // Inject client_country into every submit context so the model can use it in tool calls
+  const value = {
+    ...streamValue,
+    submit: (
+      params?: { messages?: any; context?: Record<string, unknown> },
+      options?: any,
+    ) => {
+      const metaMessage = clientMeta.country
+        ? {
+            id: `${DO_NOT_RENDER_ID_PREFIX}${(globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2))}`,
+            type: "human",
+            content: [
+              { type: "text", text: `client_country: ${clientMeta.country}` },
+            ],
+          }
+        : undefined;
+
+      const merged = params
+        ? {
+            ...params,
+            messages: Array.isArray(params.messages)
+              ? [...(params.messages as any[]), ...(metaMessage ? [metaMessage] : [])]
+              : params.messages,
+            context: {
+              ...(params.context || {}),
+              ...(clientMeta.country ? { client_country: clientMeta.country } : {}),
+            },
+          }
+        : params;
+      return streamValue.submit(merged as any, options);
+    },
+  } as typeof streamValue;
+
   useEffect(() => {
     checkGraphStatus(apiUrl, apiKey).then((ok) => {
       if (!ok) {
@@ -131,7 +186,7 @@ const StreamSession = ({
   }, [apiKey, apiUrl]);
 
   return (
-    <StreamContext.Provider value={streamValue}>
+    <StreamContext.Provider value={value}>
       {children}
     </StreamContext.Provider>
   );

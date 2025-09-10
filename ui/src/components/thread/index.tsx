@@ -3,6 +3,7 @@ import { ReactNode, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useStreamContext } from "@/providers/Stream";
+import { useThreads } from "@/providers/Thread";
 import { useState, FormEvent } from "react";
 import { Button } from "../ui/button";
 import { Checkpoint, Message } from "@langchain/langgraph-sdk";
@@ -194,6 +195,7 @@ export function Thread() {
     const context =
       Object.keys(artifactContext).length > 0 ? artifactContext : undefined;
 
+    
     stream.submit(
       { messages: [...toolMessages, newHumanMessage], context },
       {
