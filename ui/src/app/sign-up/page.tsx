@@ -1,18 +1,24 @@
+"use client";
+
 import { SignUp } from '@clerk/nextjs'
+import { Button } from '@/components/ui/button'
+import React from "react";
 
 export default function SignUpPage() {
+
+  const handleGuestMode = () => {
+    // Use sessionStorage instead of localStorage for session-only guest mode
+    sessionStorage.setItem('guestMode', 'true');
+    // Force a page reload to ensure the guest mode is recognized
+    window.location.href = '/';
+  };
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
       <div className="w-full max-w-md">
-        <div className="mb-8 text-center">
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">
-            Join Booked.AI
-          </h1>
-          <p className="mt-2 text-gray-600 dark:text-gray-400">
-            Create your account to get started
-          </p>
-        </div>
         <SignUp 
+          routing="path"
+          path="/sign-up"
           appearance={{
             elements: {
               formButtonPrimary: 
@@ -28,6 +34,15 @@ export default function SignUpPage() {
             },
           }}
         />
+        <div className="mt-6 text-center relative z-10 w-full max-w-[400px]">
+          <Button 
+            onClick={handleGuestMode}
+            variant="outline" 
+            className="w-full bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-600"
+          >
+            Continue as Guest
+          </Button>
+        </div>
       </div>
     </div>
   );

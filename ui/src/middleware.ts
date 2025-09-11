@@ -4,7 +4,7 @@ const isPublicRoute = createRouteMatcher([
   '/sign-in(.*)',
   '/sign-up(.*)',
   '/api(.*)',
-  '/', // Allow root route for guest access
+  '/(.*)', // Allow all routes for guest access (catch-all)
 ])
 
 export default clerkMiddleware(async (auth, req) => {
