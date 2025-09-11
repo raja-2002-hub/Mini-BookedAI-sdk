@@ -377,6 +377,7 @@ async def create_flight_booking(offer_id: str, passengers: list, payments: list,
     Book a flight using the provided order data.
     This endpoint will fetch the offer, extract Duffel passenger IDs,
     and merge them with the user-supplied passenger info.
+    Supports optional 'services' (e.g., seat selections).
     
     Args:
         offer_id: The Duffel offer ID
@@ -434,12 +435,16 @@ async def create_flight_booking(offer_id: str, passengers: list, payments: list,
         "passengers": final_passengers,
         "payments": payments
     }
-    
+
+    if services:
+        order_data["services"] = services  # Add seat selections if provided
+
     # 4. Add services if provided (following Duffel API structure)
     if services and len(services) > 0:
         order_data["services"] = services
     
     try:
+        logger.info(f"Booking flight with order data: {order_data}")
         return await endpoint.book_flight(order_data)
     except DuffelAPIError as e:
         # Try to extract a useful error message

@@ -46,14 +46,13 @@ Required environment variables:
 ### 4. Run the Agent
 
 ```bash
-# Option A: LangGraph development server (no extra routes)
+# LangGraph development server
 langgraph dev
 
 # Option B: Unified backend with Starlette (auth + profiles)
 uvicorn src.server:app --host 0.0.0.0 --port 8080 --reload
 ```
 
-Option B also exposes `/auth/initialize` endpoint (currently disabled).
 
 ### 5. Connect to UI
 
