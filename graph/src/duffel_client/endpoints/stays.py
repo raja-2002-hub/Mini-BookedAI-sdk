@@ -14,6 +14,11 @@ from ..client import DuffelClient, DuffelAPIError
 from ..models.stays import HotelSearchRequest, HotelSearchResponse, Hotel, Room, Rate, Amenity
 from ..models.common import Money, Address, Coordinates, DateRange, Guest
 
+from src.duffel_client.endpoints.payments import (
+    create_stripe_token,
+    create_stripe_payment_intent,
+    create_stripe_refund
+)
 
 logger = logging.getLogger(__name__)
 geolocator = Nominatim(user_agent="booked-ai")
@@ -110,11 +115,9 @@ class StaysEndpoint:
                 "email": email,
                 "stay_special_requests": stay_special_requests,
                 "phone_number": phone_number,
+                "metadata": {"stripe_payment_intent_id": payment.get("stripe_payment_intent_id")}
             }
         }
-        logger.info(f"Payment in stays.py: {payment}")
-        # if payment:            
-        #     data["data"]["payment"] = payment
         logger.info(f"Data in stays.py before sending to api: {data}")
         return await self.client.post(endpoint, data=data)
     
@@ -126,6 +129,131 @@ class StaysEndpoint:
             return response
         except Exception as e:
             logger.error(f"Error cancelling hotel booking {booking_id}: {e}")
+            raise DuffelAPIError({
+                'type': 'client_error',
+                'title': 'Hotel booking cancellation failed',
+                'detail': str(e)
+            })
+        
+    async def cancel_hotel_booking_with_refund(
+        self,
+        booking_id: str,
+        refund_amount: Optional[float] = None,
+        refund_reason: str = "requested_by_customer"
+    ) -> Dict[str, Any]:
+        """
+        Cancel a hotel booking and issue a Stripe refund if applicable.
+
+        Args:
+            booking_id: The ID of the booking to cancel (e.g., "bok_0000AxNtHvxFHgcXbJQFW4").
+            refund_amount: Optional amount to refund (in booking's currency; if None, full refund).
+            refund_reason: Reason for refund (e.g., "requested_by_customer", "duplicate").
+
+        Returns:
+            Dict with cancellation status and refund details.
+
+        Raises:
+            DuffelAPIError: For API errors during cancellation or refund.
+        """
+        try:
+            # Step 1: Get booking details to retrieve metadata and cost
+            booking_response = await self.client.get(f"/stays/bookings/{booking_id}")
+            booking = booking_response.get("data", {})
+            if not booking:
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Booking not found',
+                    'detail': f"Booking {booking_id} not found"
+                })
+            logger.info(f"Fetched booking details for cancellation: {booking_id}")
+
+            # Validate booking status
+            if booking.get("status") != "confirmed":
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Invalid booking status',
+                    'detail': f"Booking {booking_id} is not in confirmed status: {booking.get('status')}"
+                })
+
+            # Check cancellation timeline
+            rooms = booking.get("accommodation", {}).get("rooms", [])
+            if not rooms or not rooms[0].get("rates"):
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Invalid booking data',
+                    'detail': 'No valid room or rate data found'
+                })
+            original_cost = sum(float(room["rates"][0]["total_amount"]) for room in rooms)
+            original_currency = rooms[0]["rates"][0]["total_currency"]
+            cancellation_timeline = rooms[0]["rates"][0].get("cancellation_timeline", [])
+            cancel_deadline = None
+            for timeline in cancellation_timeline:
+                if timeline.get("refund_amount") == rooms[0]["rates"][0]["total_amount"]:
+                    cancel_deadline = datetime.fromisoformat(timeline["before"].replace("Z", "+00:00"))
+                    break
+            current_time = datetime.now(tz=cancel_deadline.tzinfo if cancel_deadline else timezone.utc)
+            if cancel_deadline and current_time > cancel_deadline:
+                raise GraphInterrupt(
+                    f"Cancellation deadline has passed for booking {booking_id} ({cancel_deadline}). "
+                    "Do you still want to proceed with cancellation (this may be non-refunded)?"
+                )
+
+            # Step 2: Cancel the booking
+            logger.info(f"Attempting to cancel booking {booking_id}")
+            cancel_response = await self.cancel_booking(booking_id)
+            if "error" in cancel_response:
+                logger.error(f"Cancellation failed. API response: {cancel_response}")
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Cancellation failed',
+                    'detail': f"Could not cancel booking: {cancel_response.get('error', {}).get('message', 'Unknown error')}"
+                })
+            if cancel_response.get("data", {}).get("status") != "cancelled" or not cancel_response.get("data", {}).get("cancelled_at"):
+                logger.error(f"Cancellation failed. API response: {cancel_response}")
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Cancellation failed',
+                    'detail': 'Could not confirm cancellation of the booking'
+                })
+            logger.info(f"Successfully canceled booking {booking_id}")
+
+            # Step 3: Process Stripe refund if applicable
+            refund_result = {"refund_processed": False, "refund_id": None, "refund_status": None}
+            original_metadata = booking.get("metadata", {})
+            stripe_payment_intent_id = original_metadata.get("stripe_payment_intent_id")
+            if stripe_payment_intent_id:
+                try:
+                    logger.info(f"Refunding Stripe Payment Intent: {stripe_payment_intent_id}")
+                    refund_response = await create_stripe_refund(
+                        payment_intent_id=stripe_payment_intent_id,
+                        amount=refund_amount if refund_amount is not None else original_cost,
+                        reason=refund_reason
+                    )
+                    refund_result = {
+                        "refund_processed": True,
+                        "refund_id": refund_response["refund_id"],
+                        "refund_status": refund_response["status"]
+                    }
+                    logger.info(f"Stripe refund successful: {refund_response['refund_id']}, status: {refund_response['status']}")
+                except Exception as refund_error:
+                    logger.error(f"Stripe refund failed: {str(refund_error)}")
+                    # Continue despite refund failure; can be processed manually
+                    refund_result["refund_error"] = str(refund_error)
+            else:
+                logger.warning("No Stripe Payment Intent ID found in booking metadata; skipping refund")
+
+            return {
+                "status": "success",
+                "booking_id": booking_id,
+                "cancelled_at": cancel_response.get("data", {}).get("cancelled_at"),
+                **refund_result
+            }
+
+        except DuffelAPIError as e:
+            logger.error(f"Duffel API error cancelling booking {booking_id}: {e}")
+            raise
+        except Exception as e:
+            logger.exception(f"Unexpected error cancelling booking {booking_id}: {e}")
             raise DuffelAPIError({
                 'type': 'client_error',
                 'title': 'Hotel booking cancellation failed',
@@ -443,6 +571,35 @@ class StaysEndpoint:
                 })
             logger.info(f"Processing payment: {payment}")
 
+            logger.info("Processing Stripe payment for extended stay")
+            try:
+                stripe_card_details = {
+                    "card[number]": payment.get("card_number"),
+                    "card[exp_month]": payment.get("expiry_month"),
+                    "card[exp_year]": payment.get("expiry_year"),
+                    "card[cvc]": payment.get("cvc") or payment.get("cvv"),
+                    "card[name]": payment.get("cardholder_name")
+                    }
+                token_response = await create_stripe_token(stripe_card_details)
+                token_id = token_response["token_id"]
+                logger.info(f"Created Stripe token: {token_id}")
+
+                intent_response = await create_stripe_payment_intent(
+                    amount=float(quote_response.get("data", {}).get("total_amount", "0.00")),
+                    currency=quote_response.get("data", {}).get("total_currency", "AUD"),
+                    token_id=token_id,
+                    return_url="https://your-server.com/return"
+                )
+                payment_intent_id_new = intent_response["payment_intent_id"]
+                logger.info(f"Created Stripe Payment Intent for new booking: {payment_intent_id_new}")
+            except Exception as e:
+                logger.error(f"Stripe payment for new booking failed: {str(e)}")
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Payment failed',
+                    'detail': f"Stripe payment failed: {str(e)}"
+                })
+
             # Step 10: Cancel the original booking
             logger.info(f"Attempting to cancel booking {booking_id}")
             cancel_response = await self.cancel_booking(booking_id)
@@ -462,6 +619,24 @@ class StaysEndpoint:
                 })
             logger.info(f"Successfully canceled booking {booking_id}")
 
+            # Refund original Stripe payment from metadata
+            original_metadata = booking.get("metadata", {})
+            original_stripe_id = original_metadata.get("stripe_payment_intent_id")
+            if original_stripe_id:
+                try:
+                    logger.info(f"Refunding original Stripe Payment Intent: {original_stripe_id}")
+                    refund_response = await create_stripe_refund(
+                        payment_intent_id=original_stripe_id,
+                        amount=original_cost,  # Full refund of original amount
+                        reason="requested_by_customer"  # Or "duplicate" if applicable
+                    )
+                    logger.info(f"Stripe refund successful: {refund_response['refund_id']}, status: {refund_response['status']}")
+                except Exception as refund_error:
+                    logger.error(f"Stripe refund failed: {str(refund_error)}")
+
+            else:
+                logger.warning("No Stripe Payment Intent ID found in original booking metadata; skipping refund")
+
             # Step 11: Create the new booking
             logger.info(f"Creating new booking with quote {quote_id}")
             booking_body = {
@@ -469,11 +644,9 @@ class StaysEndpoint:
                 "guests": guest_details,
                 "email": email,
                 "phone_number": phone_number,
-                "stay_special_requests": stay_special_requests
-                # "payment": payment
+                "stay_special_requests": stay_special_requests,
+                "payment": {"stripe_payment_intent_id": payment_intent_id_new}
             }
-            if booking.get("metadata"):
-                booking_body["metadata"] = booking["metadata"]
             if booking.get("loyalty_programme_account_number"):
                 booking_body["loyalty_programme_account_number"] = booking["loyalty_programme_account_number"]
             new_booking_response = await self.create_booking(**booking_body)
@@ -491,6 +664,7 @@ class StaysEndpoint:
                 "new_booking_id": new_booking.get("id"),
                 "cost_change": cost_change,
                 "payment_provided": True,
+                "refund_processed": original_stripe_id is not None,
                 "_payment_mode": "test"
             }
 
@@ -884,7 +1058,7 @@ async def cancel_hotel_booking(booking_id: str) -> dict:
     from ..client import get_client
     client = get_client()
     stays_endpoint = StaysEndpoint(client)
-    return await stays_endpoint.cancel_booking(booking_id)
+    return await stays_endpoint.cancel_hotel_booking_with_refund(booking_id,refund_reason="requested_by_customer")
 
 async def update_hotel_booking(booking_id: str, data: dict) -> dict:
     """Convenience function to update a hotel booking by booking_id."""

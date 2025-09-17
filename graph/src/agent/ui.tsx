@@ -192,7 +192,8 @@ const HotelResultCard = ({ hotels }) => {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [paymentData, setPaymentData] = useState({
       cardNumber: '',
-      expiryDate: '',
+      expiryMonth: '',
+      expiryYear: '',
       cvc: '',
       name: ''
     });
@@ -206,31 +207,17 @@ const HotelResultCard = ({ hotels }) => {
       handleInputChange('cardNumber', formattedValue);
     };
   
-    const handleExpiryDateChange = (value: string) => {
-      const formattedValue = value.replace(/\D/g, '').replace(/(\d{2})(\d{0,2})/, '$1/$2').trim();
-      handleInputChange('expiryDate', formattedValue);
-    };
-  
     const handleSubmit = async () => {
       setIsSubmitting(true);
     
-      try {
-        let expiryMonth = '';
-        let expiryYear = '';
-    
-        if (paymentData.expiryDate) {
-          const [month, year] = paymentData.expiryDate.split('/').filter(Boolean);
-          if (month && year) {
-            expiryMonth = month.padStart(2, '0');
-            expiryYear = year.length === 2 ? `20${year}` : year;
-          }
-        }
-    
+      try {    
         const processedData: PaymentData = {
           ...paymentData,
           cardNumber: paymentData.cardNumber.replace(/\s/g, ''),
-          expiryMonth,
-          expiryYear,
+          expiryMonth: paymentData.expiryMonth.padStart(2, '0'),
+          expiryYear: paymentData.expiryYear.length === 2 ? `20${paymentData.expiryYear}` : paymentData.expiryYear,
+          cvc: paymentData.cvc,
+          name: paymentData.name,
           metadata
         };
     
@@ -280,132 +267,196 @@ const HotelResultCard = ({ hotels }) => {
     const displayAmount = data?.amount || amount;
     const displayCurrency = data?.currency || currency;
     const formTitle = data?.title || "Complete Payment";
-  
+
+    // Inline styles for the card-like design
+    const containerStyle = {
+      background: 'linear-gradient(to bottom, #e6f0fa, #ffffff)',
+      borderRadius: '8px',
+      boxShadow: '0 2px 4px rgba(0, 0, 0, 0.1)',
+      padding: '20px'
+    };
+
+    const buttonStyle = {
+      background: 'linear-gradient(to bottom, #4a1d96, #2d1b69)',
+      border: 'none',
+      borderRadius: '4px',
+      color: 'white',
+      fontSize: '16px',
+      fontWeight: 'bold',
+      cursor: 'pointer',
+      textAlign: 'center' as const,
+      boxShadow: '0 2px 4px rgba(0, 0, 0, 0.2)',
+      width: '100%',
+      padding: '12px'
+    };
+
+    const inputStyle = {
+      padding: '8px 12px',
+      border: '1px solid #ccc',
+      borderRadius: '4px',
+      fontSize: '14px',
+      width: '100%',
+      boxSizing: 'border-box' as const
+    };
+
+    const summaryStyle = {
+      background: '#f0f8ff',
+      padding: '15px',
+      borderRadius: '4px',
+      marginBottom: '20px',
+      border: '1px solid #ddd'
+    };
+
     return (
-      <div className="max-w-md mx-auto bg-white rounded-lg shadow-md p-6">
-        {/* Booking Summary */}
-        {metadata && (
-          <div className="mb-6 bg-gray-50 p-4 rounded-md border border-gray-200">
-            <h3 className="font-bold text-lg mb-2 text-gray-800">Booking Summary</h3>          
-            {metadata.guests && (
-              <p className="text-sm text-gray-700">
-                <span className="font-medium">Guests:</span> {metadata.guests.map((g) => `${g.given_name} ${g.family_name}`).join(', ')}
-              </p>
-            )}
-          </div>
-        )}
-  
-        {/* Payment Amount Display */}
-        {displayAmount && displayCurrency && (
-          <div className="bg-blue-50 border border-blue-200 rounded-md p-4 mb-6 text-center">
-            <p className="text-sm text-blue-800 mb-1">Total Amount</p>
-            <p className="text-xl font-medium text-blue-800">
-              {displayAmount} {displayCurrency}
+      <div className="max-w-md mx-auto" style={containerStyle}>
+        {/* Combined Summary Section */}
+        <div style={summaryStyle}>
+          <h3 style={{ fontWeight: 'bold', fontSize: '18px', marginBottom: '8px', color: '#374151' }}>
+            Booking Summary
+          </h3>
+          {metadata?.guests && (
+            <p style={{ fontSize: '14px', color: '#4b5563', marginBottom: '8px' }}>
+              <span style={{ fontWeight: '500' }}>Guests:</span> {metadata.guests.map((g) => `${g.given_name} ${g.family_name}`).join(', ')}
             </p>
-          </div>
-        )}
-  
-        {/* Payment Form */}
-        <div className="space-y-4">
-          {data?.fields ? (
-            data.fields.map(field => (
-              <div key={field.name}>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {field.label}
-                  {field.required && <span className="text-red-500">*</span>}
-                </label>
-                <input
-                  type={field.type}
-                  placeholder={field.placeholder}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  value={paymentData[field.name as keyof typeof paymentData] || ''}
-                  onChange={(e) => handleInputChange(field.name, e.target.value)}
-                  required={field.required}
-                />
-              </div>
-            ))
-          ) : (
-            <>
-              {/* Card Number */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Card Number
-                </label>
-                <input
-                  type="text"
-                  placeholder="1234 5678 9012 3456"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  value={paymentData.cardNumber}
-                  onChange={(e) => handleCardNumberChange(e.target.value)}
-                  maxLength={19}
-                  required
-                />
-              </div>
-  
-              <div className="grid grid-cols-2 gap-4">
-                {/* Expiry Date */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Expiry Date
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="MM/YY"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    value={paymentData.expiryDate}
-                    onChange={(e) => handleExpiryDateChange(e.target.value)}
-                    maxLength={5}
-                    required
-                  />
-                </div>
-  
-                {/* CVC */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    CVC
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="123"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    value={paymentData.cvc}
-                    onChange={(e) => handleInputChange('cvc', e.target.value)}
-                    maxLength={4}
-                    required
-                  />
-                </div>
-              </div>
-  
-              {/* Cardholder Name */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Cardholder Name
-                </label>
-                <input
-                  type="text"
-                  placeholder="John Smith"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  value={paymentData.name}
-                  onChange={(e) => handleInputChange('name', e.target.value)}
-                  required
-                />
-              </div>
-            </>
+          )}
+          {displayAmount && displayCurrency && (
+            <p style={{ fontSize: '14px', color: '#4b5563' }}>
+              <span style={{ fontWeight: '500' }}>Total Amount:</span> {displayAmount} {displayCurrency}
+            </p>
           )}
         </div>
-  
+
+        {/* Payment Form */}
+        <div style={{ marginBottom: '20px' }}>
+          {/* Cardholder Name */}
+          <div style={{ marginBottom: '15px' }}>
+            <label style={{ display: 'block', fontSize: '14px', color: '#374151', marginBottom: '5px', fontWeight: '500' }}>
+              Cardholder Name<span style={{ color: '#ef4444' }}>*</span>
+            </label>
+            <input
+              type="text"
+              placeholder="e.g. Jane Appleseed"
+              style={inputStyle}
+              value={paymentData.name}
+              onChange={(e) => handleInputChange('name', e.target.value)}
+              required
+            />
+          </div>
+
+          {/* Card Number */}
+          <div style={{ marginBottom: '15px' }}>
+            <label style={{ display: 'block', fontSize: '14px', color: '#374151', marginBottom: '5px', fontWeight: '500' }}>
+              Card Number<span style={{ color: '#ef4444' }}>*</span>
+            </label>
+            <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+              <input
+                type="text"
+                placeholder="e.g. 1234 5678 9123 0000"
+                style={{ ...inputStyle, flex: 1 }}
+                value={paymentData.cardNumber}
+                onChange={(e) => handleCardNumberChange(e.target.value)}
+                maxLength={19}
+                required
+              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                <img 
+                  src="https://upload.wikimedia.org/wikipedia/commons/4/41/Visa_Logo.png" 
+                  alt="Visa"
+                  style={{ height: '20px', width: 'auto' }}
+                />
+                <img 
+                  src="https://upload.wikimedia.org/wikipedia/commons/2/2a/Mastercard-logo.svg" 
+                  alt="Mastercard"
+                  style={{ height: '20px', width: 'auto' }}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Expiry Date and CVC */}
+          <div style={{ marginBottom: '15px' }}>
+            <label style={{ 
+              display: 'block', 
+              fontSize: '12px', 
+              color: '#6b7280', 
+              marginBottom: '8px', 
+              fontWeight: '600',
+              textTransform: 'uppercase',
+              letterSpacing: '0.5px',
+              fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+            }}>
+              EXP. DATE (MM/YY) / CVC<span style={{ color: '#ef4444' }}>*</span>
+            </label>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <input
+                type="text"
+                placeholder="MM"
+                style={{ 
+                  ...inputStyle, 
+                  width: '60px',
+                  fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+                }}
+                value={paymentData.expiryMonth}
+                onChange={(e) => handleInputChange('expiryMonth', e.target.value)}
+                maxLength={2}
+                required
+              />
+              <input
+                type="text"
+                placeholder="YY"
+                style={{ 
+                  ...inputStyle, 
+                  width: '60px',
+                  fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+                }}
+                value={paymentData.expiryYear}
+                onChange={(e) => handleInputChange('expiryYear', e.target.value)}
+                maxLength={2}
+                required
+              />
+              <input
+                type="text"
+                placeholder="e.g. 123"
+                style={{ 
+                  ...inputStyle, 
+                  flex: 1,
+                  fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+                }}
+                value={paymentData.cvc}
+                onChange={(e) => handleInputChange('cvc', e.target.value)}
+                maxLength={4}
+                required
+              />
+            </div>
+          </div>
+        </div>
+
         {/* Submit Button */}
         <button
           type="button"
           onClick={handleSubmit}
-          className="w-full mt-6 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-md transition duration-150 ease-in-out disabled:opacity-50"
+          style={{
+            ...buttonStyle,
+            opacity: isSubmitting || stream.isLoading ? 0.5 : 1
+          }}
           disabled={isSubmitting || stream.isLoading}
+          onMouseOver={(e) => {
+            if (!isSubmitting && !stream.isLoading) {
+              e.currentTarget.style.background = 'linear-gradient(to bottom, #5a2db6, #3d2b79)';
+            }
+          }}
+          onMouseOut={(e) => {
+            if (!isSubmitting && !stream.isLoading) {
+              e.currentTarget.style.background = 'linear-gradient(to bottom, #4a1d96, #2d1b69)';
+            }
+          }}
         >
-          {isSubmitting ? 'Processing Payment...' : 'Pay Now'}
+          {isSubmitting ? 'Processing Payment...' : 'Confirm'}
         </button>
       </div>
     );
   };
+
   
   export default {
     hotelResults: HotelResultCard,
