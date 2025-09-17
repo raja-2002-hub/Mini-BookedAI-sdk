@@ -1,3 +1,5 @@
+"use client";
+
 import React, {
   createContext,
   useContext,
@@ -26,6 +28,7 @@ import { getApiKey } from "@/lib/api-key";
 import { useThreads } from "./Thread";
 import { toast } from "sonner";
 import { DO_NOT_RENDER_ID_PREFIX } from "@/lib/ensure-tool-responses";
+import { useAuth, useUser } from "@clerk/nextjs";
 
 
 export type StateType = { messages: Message[]; ui?: UIMessage[] };
@@ -80,9 +83,13 @@ const StreamSession = ({
   apiUrl: string;
   assistantId: string;
 }) => {
+  // Resolve absolute API base to avoid SDK URL errors
+  const apiBase = typeof window !== "undefined" ? `${window.location.origin}/api` : "/api";
   const [threadId, setThreadId] = useQueryState("threadId");
   const { getThreads, setThreads } = useThreads();
   const [clientMeta, setClientMeta] = useState<{ ip?: string; country?: string }>({});
+  const { isSignedIn, userId, isLoaded: authLoaded } = useAuth();
+  const { user, isLoaded: userLoaded } = useUser();
 
   useEffect(() => {
     (async () => {
@@ -96,17 +103,16 @@ const StreamSession = ({
       }
     })();
   }, []);
+
+  // No URL user_id injection; proxy resolves via Clerk on server
+
+  // Always go through Next.js API passthrough so headers are preserved server-side
   const streamValue = useTypedStream({
-    apiUrl,
+    apiUrl: apiBase,
     apiKey: apiKey ?? undefined,
     assistantId,
     threadId: threadId ?? null,
-    defaultHeaders: (() => {
-      const headers: Record<string, string> = {};
-      if (clientMeta.ip) headers["X-Client-IP"] = clientMeta.ip;
-      if (clientMeta.country) headers["X-Client-Country"] = clientMeta.country;
-      return Object.keys(headers).length ? headers : undefined as any;
-    })(),
+    defaultHeaders: undefined as any,
     onCustomEvent: (event, options) => {
       console.log("[STREAM] Custom event received:", event);
       
@@ -134,32 +140,26 @@ const StreamSession = ({
     },
   });
 
-  // Inject client_country into every submit context so the model can use it in tool calls
+  // Inject client_country and user context into every submit context so the model can use it in tool calls
   const value = {
     ...streamValue,
     submit: (
       params?: { messages?: any; context?: Record<string, unknown> },
       options?: any,
     ) => {
-      const metaMessage = clientMeta.country
-        ? {
-            id: `${DO_NOT_RENDER_ID_PREFIX}${(globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2))}`,
-            type: "human",
-            content: [
-              { type: "text", text: `client_country: ${clientMeta.country}` },
-            ],
-          }
-        : undefined;
+      // Only pass non-sensitive context data through message context
+      // Authentication is handled exclusively through headers for security
+      const contextData: Record<string, unknown> = {};
+      if (clientMeta.country) {
+        contextData.client_country = clientMeta.country;
+      }
 
       const merged = params
         ? {
             ...params,
-            messages: Array.isArray(params.messages)
-              ? [...(params.messages as any[]), ...(metaMessage ? [metaMessage] : [])]
-              : params.messages,
             context: {
               ...(params.context || {}),
-              ...(clientMeta.country ? { client_country: clientMeta.country } : {}),
+              ...contextData,
             },
           }
         : params;
@@ -168,12 +168,12 @@ const StreamSession = ({
   } as typeof streamValue;
 
   useEffect(() => {
-    checkGraphStatus(apiUrl, apiKey).then((ok) => {
+    checkGraphStatus(apiBase, apiKey).then((ok) => {
       if (!ok) {
         toast.error("Failed to connect to LangGraph server", {
           description: () => (
             <p>
-              Please ensure your graph is running at <code>{apiUrl}</code> and
+              Please ensure your graph is running at <code>{apiBase}</code> and
               your API key is correctly set (if connecting to a deployed graph).
             </p>
           ),
@@ -183,7 +183,7 @@ const StreamSession = ({
         });
       }
     });
-  }, [apiKey, apiUrl]);
+  }, [apiKey, apiBase]);
 
   return (
     <StreamContext.Provider value={value}>

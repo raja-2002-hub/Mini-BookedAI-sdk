@@ -48,9 +48,6 @@ Required environment variables:
 ```bash
 # LangGraph development server
 langgraph dev
-
-# Option B: Unified backend with Starlette (auth + profiles)
-uvicorn src.server:app --host 0.0.0.0 --port 8080 --reload
 ```
 
 

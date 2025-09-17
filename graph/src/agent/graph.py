@@ -38,7 +38,6 @@ from langgraph.prebuilt import ToolNode
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from typing import Literal
-from langgraph.checkpoint.memory import MemorySaver
 
 # Import our Duffel client
 from src.duffel_client.endpoints.stays import search_hotels, fetch_hotel_rates, create_quote, create_booking, cancel_hotel_booking, update_hotel_booking, extend_hotel_stay
@@ -96,6 +95,9 @@ class UserIDManager:
 
 # Global instance of the user ID manager
 user_id_manager = UserIDManager()
+
+# Global user metadata storage for mem0
+global_user_metadata = {}
 
 def get_current_user_id() -> str:
     """Get the current user ID for mem0 operations."""
@@ -1925,7 +1927,7 @@ Help the user with their travel plans in a conversational, personal way.
 </instructions>
 
  <memory_instructions>
- Store user preferences with remember_tool when they mention likes/dislikes. When searching for preferences, use recall_tool with specific terms from the user's request (e.g., "paris", "melbourne", "window seat") along with generic queries. ALWAYS call recall_tool first before any other actions.
+ Store user preferences with remember_tool when they mention likes/dislikes, including food preferences, travel preferences, and personal preferences that could be relevant for travel planning. Remember user preferences (food, activities, etc.) that could be relevant for travel planning. When searching for preferences, use recall_tool with specific terms from the user's request (e.g., "paris", "melbourne", "window seat") along with generic queries. Use recall_tool when you need to search for existing memories, but don't call it after remember_tool unless specifically needed.
  </memory_instructions>
 
 
@@ -2096,12 +2098,80 @@ def human_input_node(state: AgentState) -> Dict[str, Any]:
 
 
 async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
-    logger.info("Context preparation started")
+    logger.info("Context preparation started - Hybrid approach (checkpointer + mem0)")
     
     # Debug logging
     logger.info(f"State keys: {list(state.keys())}")
     logger.info(f"Configurable: {state.get('configurable', {})}")
     logger.info(f"Metadata: {state.get('metadata', {})}")
+    logger.info(f"Headers in state: {state.get('headers', 'NOT_FOUND')}")
+    logger.info(f"Full state: {state}")
+    
+    # Try to access user_id from the request body directly
+    # The bodyParameters function should have injected it
+    try:
+        # Check if there's a request body in the state
+        if 'request_body' in state:
+            request_body = state.get('request_body', {})
+            logger.info(f"🔍 [AUTH DEBUG] Request body: {request_body}")
+            if isinstance(request_body, dict) and 'configurable' in request_body:
+                body_configurable = request_body.get('configurable', {})
+                logger.info(f"🔍 [AUTH DEBUG] Body configurable: {body_configurable}")
+                if 'user_id' in body_configurable:
+                    logger.info(f"🔍 [AUTH DEBUG] Found user_id in request body: {body_configurable['user_id']}")
+        
+        # Check if user_id is directly in the state (from bodyParameters injection)
+        state_user_id = state.get('user_id')
+        if state_user_id:
+            logger.info(f"🔍 [AUTH DEBUG] Found user_id directly in state: {state_user_id}")
+            
+        # Check if authenticated is in state
+        state_authenticated = state.get('authenticated')
+        if state_authenticated:
+            logger.info(f"🔍 [AUTH DEBUG] Found authenticated directly in state: {state_authenticated}")
+            
+        # Check messages for user_id/authenticated in additional_kwargs (scan most recent first)
+        messages = state.get('messages', [])
+        message_user_id = None
+        message_authenticated = None
+        if isinstance(messages, list) and messages:
+            for message in reversed(messages):
+                try:
+                    additional = getattr(message, 'additional_kwargs', None)
+                    if isinstance(additional, dict):
+                        if message_user_id is None and 'user_id' in additional:
+                            message_user_id = additional.get('user_id')
+                        if message_authenticated is None and 'authenticated' in additional:
+                            message_authenticated = additional.get('authenticated')
+                        if message_user_id is not None or message_authenticated is not None:
+                            logger.info(f"🔍 [AUTH DEBUG] Found in recent message - user_id: {message_user_id}, authenticated: {message_authenticated}")
+                            break
+                except Exception:
+                    continue
+            
+    except Exception as e:
+        logger.debug(f"Could not access request body: {e}")
+    
+    # Get conversation context from checkpointer (if available)
+    conversation_context = ""
+    try:
+        # Access checkpointer through the graph's configuration
+        configurable = state.get("configurable", {})
+        thread_id = configurable.get("thread_id")
+        if thread_id:
+            # Get recent conversation history for context
+            messages = state.get("messages", [])
+            if len(messages) > 1:
+                # Get last few messages for conversation context
+                recent_messages = messages[-3:] if len(messages) >= 3 else messages
+                conversation_context = "Recent conversation context: " + "; ".join([
+                    f"{msg.type}: {getattr(msg, 'content', '')[:100]}" 
+                    for msg in recent_messages if hasattr(msg, 'content')
+                ])
+                logger.info(f"📚 [HYBRID] Retrieved conversation context: {len(conversation_context)} chars")
+    except Exception as e:
+        logger.warning(f"Failed to get conversation context from checkpointer: {e}")
+        conversation_context = ""
     
     # Helper to normalize message content into plain text
     def _to_plain_text(content: Any) -> str:
@@ -2133,29 +2203,135 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
         if hasattr(last_msg, 'content') and last_msg.content:
             user_input = _to_plain_text(last_msg.content)
     
-    # Resolve user dynamically from headers/metadata or fallback
-    from src.auth.fake_auth import get_or_create_user_by_name
-    effective_name = None
+    # Minimal in-band fallback for local dev (when headers don't reach backend)
+    inband_user_id = None
+    if "user_id: user_" in user_input:
+        try:
+            inband_user_id = user_input.split("user_id: user_")[1].split()[0]
+            inband_user_id = f"user_{inband_user_id}"
+        except:
+            pass
+    
+    # Extract user information from headers (direct LangGraph connection)
+    user_id = None
+    user_email = None
+    user_metadata = {}
     try:
         meta = state.get("metadata", {})
-        headers = meta.get("headers", {}) if isinstance(meta.get("headers", {}), dict) else {}
         cfg = state.get("configurable", {}) or {}
-        cfg_headers = cfg.get("headers", {}) if isinstance(cfg.get("headers", {}), dict) else {}
 
-        # Prefer explicit IDs from headers/metadata
-        user_id_hdr = headers.get("X-User-ID") or cfg_headers.get("X-User-ID") or meta.get("user_id")
-        # Fallbacks by name
-        user_name_hdr = headers.get("x-user-name") or meta.get("user_name") or cfg.get("user_name")
-        effective_name = user_id_hdr or user_name_hdr
-    except Exception:
-        effective_name = None
+        # Get headers from metadata (API passthrough forwards them here)
+        headers = meta.get("headers", {}) if isinstance(meta.get("headers", {}), dict) else {}
 
-    if not effective_name or not isinstance(effective_name, str) or not effective_name.strip():
-        effective_name = "anonymous-user"
-    user = get_or_create_user_by_name(effective_name)
-    user_id = user.id
+        # Also check for user_id in configurable context (from URL parameters)
+        url_user_id = cfg.get("user_id") if isinstance(cfg.get("user_id"), str) else None
+
+        # Debug logging
+        logger.info(f"🔍 [AUTH DEBUG] Headers from metadata: {list(headers.keys())}")
+        logger.info(f"🔍 [AUTH DEBUG] URL user_id: {url_user_id}")
+        logger.info(f"🔍 [AUTH DEBUG] Full metadata: {meta}")
+        logger.info(f"🔍 [AUTH DEBUG] Full configurable: {cfg}")
+
+        # Minimal: trust headers from meta.headers (set by proxy)
+        all_headers = {}
+        if isinstance(meta.get("headers"), dict):
+            all_headers.update(meta["headers"])
+        
+        # Check if headers are directly in the state (when headers=True is set)
+        if "headers" in state:
+            state_headers = state.get("headers", {})
+            if isinstance(state_headers, dict):
+                all_headers.update(state_headers)
+                logger.info(f"🔍 [AUTH DEBUG] Found headers in state: {list(state_headers.keys())}")
+        
+        # Also check for headers in the state keys
+        for key, value in state.items():
+            if key.lower().startswith("x-") and isinstance(value, str):
+                all_headers[key] = value
+        
+        # Try to extract user_id from request context
+        # Since headers aren't making it through, let's try to get it from the request
+        try:
+            import contextvars
+            # Try to get the current request context
+            request_context = contextvars.copy_context()
+            logger.info(f"🔍 [AUTH DEBUG] Request context: {request_context}")
+            
+            # Try to get user_id from the request context
+            # The API passthrough should be forwarding it as a header
+            for key, value in request_context.items():
+                if 'user' in str(key).lower() or 'auth' in str(key).lower():
+                    logger.info(f"🔍 [AUTH DEBUG] Found context key: {key} = {value}")
+        except Exception as e:
+            logger.debug(f"Could not access request context: {e}")
+
+        # Extract user information from headers (if present), else URL/body/messages
+        header_user_id = (
+            all_headers.get("X-User-ID") or
+            all_headers.get("x-user-id")
+        )
+        # Prefer headers, then message additional_kwargs, then URL/config
+        user_id = header_user_id or message_user_id or url_user_id
+        user_email = None
+        user_authenticated = all_headers.get("X-User-Authenticated") or all_headers.get("x-user-authenticated")
+        
+        # Check for authentication from multiple sources
+        is_authenticated = ((user_authenticated == "true") or bool(user_id))
+        
+        if user_id and is_authenticated:
+            # User is authenticated (either via headers or URL parameter)
+            provider = "header"
+            user_metadata = {
+                "user_id": user_id,
+                "user_email": user_email,
+                "authenticated": True,
+                "provider": provider,
+            }
+
+            # Clean up None values
+            user_metadata = {k: v for k, v in user_metadata.items() if v is not None}
+
+            if header_user_id:
+                logger.info(f"🔍 [AUTH DEBUG] ✅ Using authenticated user from headers: {user_id}")
+            elif url_user_id:
+                logger.info(f"🔍 [AUTH DEBUG] ✅ Using user from URL parameter: {user_id}")
+            else:
+                logger.info(f"🔍 [AUTH DEBUG] ✅ Using authenticated user from body/messages: {user_id}")
+        else:
+            # Fallback to anonymous user
+            user_id = "anonymous-user"
+            user_email = None
+            user_metadata = {
+                "provider": "anonymous",
+                "authenticated": False,
+            }
+
+            # Clean up None values
+            user_metadata = {k: v for k, v in user_metadata.items() if v is not None}
+
+            logger.info(f"🔍 [AUTH DEBUG] ⚠️ No authenticated user found, using anonymous user")
+
+    except Exception as e:
+        logger.error(f"Error resolving user context: {e}", exc_info=True)
+        user_id = "anonymous-user"
+        user_email = None
+        user_metadata = {"provider": "anonymous", "authenticated": False}
+
+    if not user_id or not isinstance(user_id, str) or not user_id.strip():
+        user_id = "anonymous-user"
+        user_metadata["provider"] = "anonymous"
+        user_metadata["authenticated"] = "false"
+    
     user_id_manager.current_user_id = user_id
-    logger.info(f"👤 [CONTEXT PREP] Using user: {user.name} (ID: {user_id})")
+    
+    # Store user metadata globally for mem0 access
+    global global_user_metadata
+    global_user_metadata = user_metadata
+    
+    # Log comprehensive user info
+    user_display = user_email or user_metadata.get("username") or user_id
+    logger.info(f"👤 [CONTEXT PREP] Using user: {user_display} (ID: {user_id})")
+    logger.info(f"👤 [CONTEXT PREP] User metadata: {user_metadata}")
     
     out_messages = []
     
@@ -2171,13 +2347,14 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"Entity extraction failed: {e}")
         
-        # Search for related memories
+        # Search for related memories - this refreshes the context for every conversation
         if config.MEM0_API_KEY:
             try:
                 # If user is asking to show memories, use a wildcard query
                 lowered_ui = user_input.lower()
                 wants_all = any(p in lowered_ui for p in ["show all", "show my memories", "all my memories", "list memories", "show memories"]) and "memory" in lowered_ui
                 search_query = "*" if wants_all else user_input
+                
                 # Prepend an assistant tool_call so the following ToolMessage is valid for the LLM
                 _tc_id = f"rc_{uuid4().hex[:24]}"
                 out_messages.append(
@@ -2192,9 +2369,16 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
                 )
                 # Call recall tool and display the tool result so UI shows a card
                 recall_out = await recall_tool.ainvoke({"query": search_query, "top_k": 6})
+                
+                # Enhance recall output with conversation context if available
+                enhanced_recall = recall_out
+                if conversation_context and not wants_all:
+                    enhanced_recall = f"{recall_out}\n\n{conversation_context}"
+                    logger.info(f"🔄 [HYBRID] Enhanced recall with conversation context")
+                
                 out_messages.append(
                     ToolMessage(
-                        content=recall_out,
+                        content=enhanced_recall,
                         name="recall_tool",
                         tool_call_id=_tc_id,
                     )
@@ -2218,7 +2402,7 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
         
         # Only traverse memory graph if there are related memories
         try:
-            graph_context = await traverse_memory_graph(user_input, depth=3)
+            _ = await traverse_memory_graph(user_input, depth=3)
             # Do not emit a message; keep traversal silent in UI
             # Don't show message if no connections found (not needed)
         except Exception as e:
@@ -2226,7 +2410,7 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
         
         # Opportunistic prune of older/low-importance memories
         try:
-            prune_result = await prune_memories(max_age_days=180)
+            _ = await prune_memories(max_age_days=180)
             # prune_memories returns JSON; include only when deletions happened
             # Keep pruning silent in UI
         except Exception as e:
@@ -2269,28 +2453,6 @@ def should_continue(state: AgentState) -> str:
     return "end"
 
 
-@tool
-async def set_user_tool(name: str) -> str:
-    """Set the current fake user by name (e.g., "I am Rifah").
-    This updates the in-memory user context used for memories and thread metadata.
-
-    Args:
-        name: Display name of the user.
-
-    Returns:
-        A confirmation string with the resolved user id.
-    """
-    try:
-        from src.auth.fake_auth import get_or_create_user_by_name
-        if not isinstance(name, str) or not name.strip():
-            return "Please provide a non-empty user name."
-        user = get_or_create_user_by_name(name.strip())
-        user_id_manager.current_user_id = user.id
-        logger.info(f"[SET USER TOOL] Switched user to: {user.name} (ID: {user.id})")
-        return f"Switched user to {user.name} (id={user.id})."
-    except Exception as e:
-        logger.error(f"[SET USER TOOL] Failed: {e}")
-        return f"Failed to set user: {str(e)[:80]}"
 
 @tool
 async def remember_tool(memory_content: str, context: str = "") -> str:
@@ -2301,6 +2463,12 @@ async def remember_tool(memory_content: str, context: str = "") -> str:
         memory_content: Natural language description of what to remember
         context: Additional context about when/why this was remembered
     """
+    # Skip mem0 for guest users - they should rely on conversational history
+    current_user = get_current_user_id()
+    if current_user == "anonymous-user":
+        logger.info(f"[MEMORY] Skipping mem0 storage for guest user: {memory_content[:50]}...")
+        return f"Memory noted for this conversation: {memory_content} (guest user - not stored permanently)"
+    
     # Create enhanced memory with context
     enhanced_content = memory_content
     if context:
@@ -2447,6 +2615,48 @@ async def remember_tool(memory_content: str, context: str = "") -> str:
         # Add the memory and pass explicit categories to ensure assignment
         try:
             client = AsyncMemoryClient(api_key=config.MEM0_API_KEY)
+            
+            # Enhanced metadata with user context
+            enhanced_metadata = {
+                "importance": importance,
+                "importance_score": importance_score,
+                "ttl_days": ttl_days,
+                "user_id": get_current_user_id(),
+                "timestamp": datetime.now().isoformat(),
+                "session_type": "authenticated" if user_id_manager.current_user_id not in ["guest", "anonymous", "anonymous-user"] else "guest",
+            }
+            
+            # Add user metadata if available (from context_preparation_node)
+            try:
+                global global_user_metadata
+                if global_user_metadata:
+                    # Add user name and profile info to metadata
+                    if global_user_metadata.get("first_name"):
+                        enhanced_metadata["user_first_name"] = global_user_metadata["first_name"]
+                    if global_user_metadata.get("last_name"):
+                        enhanced_metadata["user_last_name"] = global_user_metadata["last_name"]
+                    if global_user_metadata.get("username"):
+                        enhanced_metadata["user_username"] = global_user_metadata["username"]
+                    if global_user_metadata.get("user_email"):
+                        enhanced_metadata["user_email"] = global_user_metadata["user_email"]
+                    if global_user_metadata.get("provider"):
+                        enhanced_metadata["user_provider"] = global_user_metadata["provider"]
+                    
+                    # Create a user display name for better memory context
+                    user_name = ""
+                    if global_user_metadata.get("first_name") and global_user_metadata.get("last_name"):
+                        user_name = f"{global_user_metadata['first_name']} {global_user_metadata['last_name']}"
+                    elif global_user_metadata.get("first_name"):
+                        user_name = global_user_metadata["first_name"]
+                    elif global_user_metadata.get("username"):
+                        user_name = global_user_metadata["username"]
+                    
+                    if user_name:
+                        enhanced_metadata["user_name"] = user_name
+                        logger.info(f"📝 [MEMORY] Storing memory for user: {user_name}")
+            except Exception as e:
+                logger.warning(f"Failed to add user metadata to memory: {e}")
+            
             result = await client.add(
                 [
                     {"role": "user", "content": memory_content},
@@ -2454,11 +2664,7 @@ async def remember_tool(memory_content: str, context: str = "") -> str:
                 ],
                 user_id=get_current_user_id(),
                 custom_categories=custom_categories_definitions,
-                metadata={
-                    "importance": importance,
-                    "importance_score": importance_score,
-                    "ttl_days": ttl_days,
-                },
+                metadata=enhanced_metadata,
                 output_format="v1.1",
             )
         except Exception as async_err:
@@ -2470,6 +2676,47 @@ async def remember_tool(memory_content: str, context: str = "") -> str:
 
             def _sync_add() -> Any:
                 sync_client = MemoryClient(api_key=config.MEM0_API_KEY)
+                
+                # Enhanced metadata with user context
+                enhanced_metadata = {
+                    "importance": importance,
+                    "importance_score": importance_score,
+                    "ttl_days": ttl_days,
+                    "user_id": get_current_user_id(),
+                    "timestamp": datetime.now().isoformat(),
+                    "session_type": "authenticated" if user_id_manager.current_user_id not in ["guest", "anonymous", "anonymous-user"] else "guest",
+                }
+                
+                # Add user metadata if available (from context_preparation_node)
+                try:
+                    global global_user_metadata
+                    if global_user_metadata:
+                        # Add user name and profile info to metadata
+                        if global_user_metadata.get("first_name"):
+                            enhanced_metadata["user_first_name"] = global_user_metadata["first_name"]
+                        if global_user_metadata.get("last_name"):
+                            enhanced_metadata["user_last_name"] = global_user_metadata["last_name"]
+                        if global_user_metadata.get("username"):
+                            enhanced_metadata["user_username"] = global_user_metadata["username"]
+                        if global_user_metadata.get("user_email"):
+                            enhanced_metadata["user_email"] = global_user_metadata["user_email"]
+                        if global_user_metadata.get("provider"):
+                            enhanced_metadata["user_provider"] = global_user_metadata["provider"]
+                        
+                        # Create a user display name for better memory context
+                        user_name = ""
+                        if global_user_metadata.get("first_name") and global_user_metadata.get("last_name"):
+                            user_name = f"{global_user_metadata['first_name']} {global_user_metadata['last_name']}"
+                        elif global_user_metadata.get("first_name"):
+                            user_name = global_user_metadata["first_name"]
+                        elif global_user_metadata.get("username"):
+                            user_name = global_user_metadata["username"]
+                        
+                        if user_name:
+                            enhanced_metadata["user_name"] = user_name
+                except Exception as e:
+                    logger.warning(f"Failed to add user metadata to memory (sync): {e}")
+                
                 return sync_client.add(
                     [
                         {"role": "user", "content": memory_content},
@@ -2477,11 +2724,7 @@ async def remember_tool(memory_content: str, context: str = "") -> str:
                     ],
                     user_id=get_current_user_id(),
                     custom_categories=custom_categories_definitions,
-                    metadata={
-                        "importance": importance,
-                        "importance_score": importance_score,
-                        "ttl_days": ttl_days,
-                    },
+                    metadata=enhanced_metadata,
                     output_format="v1.1",
                 )
 
@@ -2497,11 +2740,24 @@ async def remember_tool(memory_content: str, context: str = "") -> str:
         logger.error(f"mem0 failed: {e}")
         return f"Memory not stored: {str(e)[:50]}"
 
+ 
+
+        
+
 @tool
 async def recall_tool(query: str, top_k: int = 6) -> str:
     """
     Simple memory recall with debug logging.
     """
+    # Skip mem0 for guest users - they should rely on conversational history
+    current_user = get_current_user_id()
+    logger.info(f"[RECALL DEBUG] Current user ID from get_current_user_id(): '{current_user}'")
+    logger.info(f"[RECALL DEBUG] User ID manager state: {user_id_manager.current_user_id}")
+    
+    if current_user in ["anonymous-user", "anonymous", "guest"] or not current_user or not current_user.startswith("user_"):
+        logger.info(f"[RECALL DEBUG] Skipping mem0 search for guest/anonymous user: '{query}' (user_id: {current_user})")
+        return "No persistent memories available for guest users."
+    
     if not config.MEM0_API_KEY:
         return "No memories available: mem0 not configured"
 
@@ -3004,7 +3260,6 @@ def create_graph():
     try:
         # Initialize tools
         tools = [
-            set_user_tool,
             get_current_time,
             calculate_simple_math,
             validate_phone_number_tool,
@@ -3023,14 +3278,17 @@ def create_graph():
             update_hotel_booking_tool,
             pay_later_tool,
             flight_payment_sequence_tool,
-            hotel_payment_sequence_tool,            list_loyalty_programmes_tool,
+            hotel_payment_sequence_tool,
+            list_loyalty_programmes_tool,
             list_flight_loyalty_programmes_tool,
             fetch_extra_baggage_options_tool,
             get_available_services_tool,
             fetch_accommodation_reviews_tool,
-            remember_tool,
-            recall_tool,
-            extend_hotel_stay_tool        ]
+        remember_tool,
+        recall_tool,
+        test_user_name_storage,
+        extend_hotel_stay_tool
+    ]
         logger.debug(f"Initializing ToolNode with {len(tools)} tools: {[tool.name for tool in tools]}")
         tool_node = ToolNode(tools)
 
@@ -3071,10 +3329,18 @@ def create_graph():
         logger.debug("Adding edge from human_input back to context_preparation")
         workflow.add_edge("human_input", "context_preparation")
 
-        # Compile the graph without custom checkpointer (LangGraph API handles persistence)
-        logger.info("Compiling workflow graph")
-        compiled_graph = workflow.compile()
-        logger.info("LangGraph workflow created and compiled successfully")
+        # Compile the graph with proper header handling
+        logger.info("Compiling workflow graph with header injection enabled")
+        
+        # Configure the graph to properly handle headers
+        compiled_graph = workflow.compile(
+            # Enable debug mode to ensure headers are properly handled
+            debug=True,
+            # Use built-in persistence
+            checkpointer=None
+        )
+        
+        logger.info("LangGraph workflow created and compiled successfully with header injection")
 
         return compiled_graph
 
@@ -3087,10 +3353,10 @@ def create_graph():
 logger.info("Initializing BookedAI agent graph...")
 graph = create_graph() 
 logger.info("BookedAI agent graph successfully initialized and ready for use")
-<<<<<<< HEAD
 
 # Global user metadata storage
 global_user_metadata = {}
+
 def set_user_metadata(user_id: str, user_email: str):
     """Set global user metadata for thread creation."""
     global global_user_metadata
@@ -3104,5 +3370,3 @@ def get_user_metadata():
     """Get global user metadata."""
     global global_user_metadata
     return global_user_metadata.copy()
-=======
->>>>>>> origin/feature/auth

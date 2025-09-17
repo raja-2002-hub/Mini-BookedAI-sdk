@@ -1,182 +1,81 @@
+"""
+LangGraph server with proper header handling for local development.
+"""
+import logging
 import os
-os.environ.setdefault("LANGGRAPH_UI", "0")
-os.environ.setdefault("LANGGRAPH_CONFIG", "")
-from typing import Any, Dict, Optional
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 
-from starlette.applications import Starlette
-from starlette.responses import JSONResponse, PlainTextResponse
-from starlette.requests import Request
-from starlette.routing import Route
-from starlette.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from contextlib import asynccontextmanager
-import json
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-
-
-
-
-
-
-
-
-
-async def healthcheck(_: Request) -> PlainTextResponse:
-    return PlainTextResponse("ok")
-
-
-from .auth.fake_auth import fake_auth, get_current_user
-
-class HeaderMiddleware(BaseHTTPMiddleware):
-    """Middleware to capture headers and add them to request state."""
+def create_custom_app():
+    """Create LangGraph app with proper header injection."""
     
-    async def dispatch(self, request: Request, call_next):
-        # Capture user headers
-        user_headers = {
-            'X-User-ID': request.headers.get('X-User-ID'),
-            'X-User-Email': request.headers.get('X-User-Email'),
-        }
+    # Set required environment variables for LangGraph
+    os.environ.setdefault("LANGGRAPH_RUNTIME_EDITION", "inmem")
+    os.environ.setdefault("DATABASE_URI", "sqlite:///test.db")
+    os.environ.setdefault("REDIS_URI", "redis://localhost:6379")
+    
+    # Import after setting environment variables
+    from langgraph_api.server import create_app as create_langgraph_app
+    
+    # Create the base LangGraph app
+    app = create_langgraph_app()
+    
+    # Add middleware to properly inject headers into the graph execution context
+    @app.middleware("http")
+    async def inject_headers_middleware(request, call_next):
+        """Middleware to inject request headers into the graph execution context."""
         
-        # Store headers in request state for later use
-        request.state.user_headers = user_headers
+        # Extract all headers from the request
+        headers = dict(request.headers)
         
-        # For POST requests to LangGraph endpoints, modify the request body
-        if request.method == "POST" and any(path in request.url.path for path in ["/threads", "/runs"]):
-            try:
-                # Read the original body
-                body = await request.body()
-                if body:
-                    body_data = json.loads(body)
-                    
-                    # Add headers to the request body
-                    if isinstance(body_data, dict):
-                        # Ensure config exists
-                        if 'config' not in body_data:
-                            body_data['config'] = {}
-                        if 'configurable' not in body_data['config']:
-                            body_data['config']['configurable'] = {}
-                        
-                        # Add headers to configurable
-                        body_data['config']['configurable']['headers'] = user_headers
-                        
-                        # Also add to metadata for thread creation
-                        if 'metadata' not in body_data:
-                            body_data['metadata'] = {}
-                        body_data['metadata']['user_id'] = user_headers['X-User-ID']
-                        body_data['metadata']['user_email'] = user_headers['X-User-Email']
-                        
-                        # Create a new request with modified body
-                        from starlette.requests import Request
-                        from starlette.datastructures import Headers
-                        
-                        # Reconstruct the request with modified body
-                        modified_body = json.dumps(body_data).encode()
-                        request._body = modified_body
-                        request.headers = Headers({
-                            **dict(request.headers),
-                            'content-length': str(len(modified_body))
-                        })
-                        
-            except Exception as e:
-                print(f"Error modifying request body: {e}")
+        # Log the headers being processed
+        logger.info(f"[SERVER] Processing request with headers: {list(headers.keys())}")
+        
+        # Store headers in request state for the graph to access
+        request.state.injected_headers = headers
         
         response = await call_next(request)
         return response
-
-async def auth_initialize(request: Request) -> JSONResponse:
-    """Initialize authentication with fake auth system."""
-    try:
-        # Get authorization header
-        auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    
+    # Override the graph execution to inject headers
+    original_stream = app.stream
+    
+    async def stream_with_headers(*args, **kwargs):
+        """Stream with proper header injection."""
+        # Get headers from request state if available
+        headers = getattr(args[0].state, 'injected_headers', {}) if hasattr(args[0], 'state') else {}
         
-        if auth_header and auth_header.lower().startswith("bearer "):
-            # Extract token
-            token = auth_header.split(" ", 1)[1].strip()
-            user = fake_auth.get_user_from_token(token)
+        # Inject headers into the graph execution context
+        if headers:
+            # Add headers to the configurable context
+            if 'configurable' not in kwargs:
+                kwargs['configurable'] = {}
+            if 'headers' not in kwargs['configurable']:
+                kwargs['configurable']['headers'] = {}
+            kwargs['configurable']['headers'].update(headers)
             
-            if user:
-                return JSONResponse({
-                    "ok": True, 
-                    "uid": user.id, 
-                    "is_guest": user.is_guest,
-                    "email": user.email,
-                    "name": user.name
-                })
+            # Also add to metadata
+            if 'metadata' not in kwargs:
+                kwargs['metadata'] = {}
+            kwargs['metadata']['headers'] = headers
+            
+            logger.info(f"[SERVER] Injected headers into graph execution: {list(headers.keys())}")
         
-        # If no valid token, create anonymous user
-        user = fake_auth.get_or_create_anonymous_user()
-        token = fake_auth.create_session_token(user.id)
-        
-        return JSONResponse({
-            "ok": True, 
-            "uid": user.id, 
-            "is_guest": user.is_guest,
-            "email": user.email,
-            "name": user.name,
-            "token": token
-        })
-        
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
-
-
-routes = [
-    Route("/health", healthcheck, methods=["GET"]),
-    Route("/auth/initialize", auth_initialize, methods=["POST"]),
-]
-
-
-@asynccontextmanager
-async def _noop_lifespan(app):
-    # Explicitly disable third-party lifespans (e.g., LangGraph runtime) in this app
-    yield
-
-
-def create_app() -> Starlette:
-    app = Starlette(routes=routes, lifespan=_noop_lifespan)
+        return await original_stream(*args, **kwargs)
     
-    # Add our custom header middleware first
-    app.add_middleware(HeaderMiddleware)
+    # Replace the stream method
+    app.stream = stream_with_headers
     
-    # CORS: allow UI origins
-    allowed_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[o.strip() for o in allowed_origins if o.strip()],
-        allow_methods=["*"],
-        allow_headers=["*"],
-        allow_credentials=True,
-    )
     return app
 
+# Create the app
+app = create_custom_app()
 
-app = create_app()
-# Force-disable any third-party lifespan handlers that might have been attached
-try:
-    app.router.lifespan_context = _noop_lifespan  # type: ignore[attr-defined]
-except Exception:
-    pass
-
-
-class _NoLifespanWrapper:
-    def __init__(self, inner_app):
-        self.inner_app = inner_app
-
-    async def __call__(self, scope, receive, send):
-        if scope.get("type") == "lifespan":
-            # Immediately acknowledge startup/shutdown without delegating
-            while True:
-                message = await receive()
-                if message.get("type") == "lifespan.startup":
-                    await send({"type": "lifespan.startup.complete"})
-                elif message.get("type") == "lifespan.shutdown":
-                    await send({"type": "lifespan.shutdown.complete"})
-                    return
-        else:
-            await self.inner_app(scope, receive, send)
-
-
-# Wrap the Starlette app so any external lifespan hooks are ignored by uvicorn
-app = _NoLifespanWrapper(app)
-
-
+if __name__ == "__main__":
+    import uvicorn
+    logger.info("Starting LangGraph server with proper header injection on port 2024")
+    uvicorn.run(app, host="0.0.0.0", port=2024, log_level="info")
