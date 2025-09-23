@@ -3286,7 +3286,6 @@ def create_graph():
             fetch_accommodation_reviews_tool,
         remember_tool,
         recall_tool,
-        test_user_name_storage,
         extend_hotel_stay_tool
     ]
         logger.debug(f"Initializing ToolNode with {len(tools)} tools: {[tool.name for tool in tools]}")
