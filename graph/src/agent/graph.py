@@ -67,6 +67,8 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
+DATABASE_URL = os.getenv("DATABASE_URI")
+logger.info(f"[DB CONFIG] DATABASE_URL set: {'Yes' if DATABASE_URL else 'No'}")
 
 class UserIDManager:
     """Simple class to manage the current user ID for mem0 operations."""
@@ -1676,7 +1678,7 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
     # System prompt
     system_prompt = """
 <identity>
-You are Luna, a knowledgeable and personable AI travel consultant for BookedAI. You combine the expertise of a seasoned travel agent with the efficiency of AI to create perfectly tailored travel experiences.
+You are a knowledgeable and personable AI travel consultant for Booked AI. You combine the expertise of a seasoned travel agent with the efficiency of AI to create perfectly tailored travel experiences.
 </identity>
 
 <personality>
@@ -1713,7 +1715,6 @@ Only discuss travel related topics.
     logger.info("[UI PREVIEW] Checking if UI components will be generated to adjust response style")
     will_have_ui_components = False
     ui_enabled_for_preview = state.get("ui_enabled", True)
-    logger.debug(f"[UI PREVIEW] UI enabled for preview check: {ui_enabled_for_preview}")
     
     if ui_enabled_for_preview:
         logger.debug(f"[UI PREVIEW] Scanning {len(state['messages'])} messages for potential UI components")
@@ -1778,16 +1779,11 @@ Since rich UI components (hotel cards, flight results, etc.) will be displayed t
         recent_tool_messages = []
         
         # Work backwards from the end to find recent tool calls in this turn
-        logger.debug(f"[UI PROCESSING] Scanning messages backwards to find recent tool calls")
         for i in range(len(state["messages"]) - 1, -1, -1):
             msg = state["messages"][i]
-            logger.debug(f"[UI PROCESSING] Message {i}: type={type(msg).__name__}, msg_type={getattr(msg, 'type', 'unknown')}")
-            
             if isinstance(msg, ToolMessage):
-                logger.debug(f"[UI PROCESSING] Found ToolMessage at index {i}: tool={msg.name}")
                 recent_tool_messages.insert(0, msg)  # Keep chronological order
             elif msg.type in ["human", "ai"]:
-                logger.debug(f"[UI PROCESSING] Hit {msg.type} message at index {i}, stopping scan")
                 # Stop when we hit a non-tool message (start of this tool sequence)
                 break
         
@@ -1833,14 +1829,7 @@ def human_input_node(state: AgentState) -> Dict[str, Any]:
 
 
 async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
-    logger.info("Context preparation started - Hybrid approach (checkpointer + mem0)")
-    
-    # Debug logging (reduced verbosity for performance)
-    logger.debug(f"State keys: {list(state.keys())}")
-    logger.debug(f"Configurable: {state.get('configurable', {})}")
-    logger.debug(f"Metadata: {state.get('metadata', {})}")
-    logger.debug(f"Headers in state: {state.get('headers', 'NOT_FOUND')}")
-    # Removed full state logging to improve performance
+    logger.info("Context preparation started - Hybrid approach (checkpointer + mem0)")   
     
     # Try to access user_id from the request body directly
     # The bodyParameters function should have injected it

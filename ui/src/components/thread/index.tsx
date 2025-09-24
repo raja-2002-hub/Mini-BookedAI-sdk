@@ -17,6 +17,7 @@ import { BookedLogoSVG } from "../icons/booked";
 import { TooltipIconButton } from "./tooltip-icon-button";
 import { ThemeSwitcher } from "../theme-switcher";
 import { AuthUserButton } from "../auth/user-button";
+import { useAuth } from "@clerk/nextjs";
 import {
   ArrowDown,
   LoaderCircle,
@@ -34,7 +35,6 @@ import { toast } from "sonner";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Label } from "../ui/label";
 import { Switch } from "../ui/switch";
-
 import {
   Tooltip,
   TooltipContent,
@@ -58,18 +58,10 @@ function StickyToBottomContent(props: {
 }) {
   const context = useStickToBottomContext();
   return (
-    <div
-      ref={context.scrollRef}
-      style={{ width: "100%", height: "100%" }}
-      className={props.className}
-    >
-      <div
-        ref={context.contentRef}
-        className={props.contentClassName}
-      >
+    <div ref={context.scrollRef} style={{ width: "100%", height: "100%" }} className={props.className}>
+      <div ref={context.contentRef} className={props.contentClassName}>
         {props.content}
       </div>
-
       {props.footer}
     </div>
   );
@@ -77,7 +69,6 @@ function StickyToBottomContent(props: {
 
 function ScrollToBottom(props: { className?: string }) {
   const { isAtBottom, scrollToBottom } = useStickToBottomContext();
-
   if (isAtBottom) return null;
   return (
     <Button
@@ -91,20 +82,18 @@ function ScrollToBottom(props: { className?: string }) {
   );
 }
 
-
-
 export function Thread() {
   const [artifactContext, setArtifactContext] = useArtifactContext();
   const [artifactOpen, closeArtifact] = useArtifactOpen();
-
+  const { userId, isLoaded, isSignedIn } = useAuth();
   const [threadId, _setThreadId] = useQueryState("threadId");
   const [chatHistoryOpen, setChatHistoryOpen] = useQueryState(
     "chatHistoryOpen",
-    parseAsBoolean.withDefault(false),
+    parseAsBoolean.withDefault(false)
   );
   const [hideToolCalls, setHideToolCalls] = useQueryState(
     "hideToolCalls",
-    parseAsBoolean.withDefault(false),
+    parseAsBoolean.withDefault(false)
   );
   const [input, setInput] = useState("");
   const {
@@ -119,17 +108,13 @@ export function Thread() {
   } = useFileUpload();
   const [firstTokenReceived, setFirstTokenReceived] = useState(false);
   const isLargeScreen = useMediaQuery("(min-width: 1024px)");
-
   const stream = useStreamContext();
   const messages = stream.messages;
   const isLoading = stream.isLoading;
-
   const lastError = useRef<string | undefined>(undefined);
 
   const setThreadId = (id: string | null) => {
     _setThreadId(id);
-
-    // close artifact and reset artifact context
     closeArtifact();
     setArtifactContext({});
   };
@@ -142,18 +127,11 @@ export function Thread() {
     try {
       const message = (stream.error as any).message;
       if (!message || lastError.current === message) {
-        // Message has already been logged. do not modify ref, return early.
         return;
       }
-
-      // Message is defined, and it has not been logged yet. Save it, and send the error
       lastError.current = message;
       toast.error("An error occurred. Please try again.", {
-        description: (
-          <p>
-            <strong>Error:</strong> <code>{message}</code>
-          </p>
-        ),
+        description: <p><strong>Error:</strong> <code>{message}</code></p>,
         richColors: true,
         closeButton: true,
       });
@@ -162,7 +140,6 @@ export function Thread() {
     }
   }, [stream.error]);
 
-  // TODO: this should be part of the useStream hook
   const prevMessageLength = useRef(0);
   useEffect(() => {
     if (
@@ -172,14 +149,12 @@ export function Thread() {
     ) {
       setFirstTokenReceived(true);
     }
-
     prevMessageLength.current = messages.length;
   }, [messages]);
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if ((input.trim().length === 0 && contentBlocks.length === 0) || isLoading)
-      return;
+    if ((input.trim().length === 0 && contentBlocks.length === 0) || isLoading) return;
     setFirstTokenReceived(false);
 
     const newHumanMessage: Message = {
@@ -192,35 +167,41 @@ export function Thread() {
     };
 
     const toolMessages = ensureToolCallsHaveResponses(stream.messages);
+    const context = Object.keys(artifactContext).length > 0 ? artifactContext : undefined;
+    const effectiveUserId = isLoaded && isSignedIn && userId ? userId : "guest";
 
-    const context =
-      Object.keys(artifactContext).length > 0 ? artifactContext : undefined;
-
-    
-    stream.submit(
-      { messages: [...toolMessages, newHumanMessage], context },
-      {
-        streamMode: ["values"],
-        optimisticValues: (prev) => ({
-          ...prev,
-          context,
-          messages: [
-            ...(prev.messages ?? []),
-            ...toolMessages,
-            newHumanMessage,
-          ],
-        }),
-      },
-    );
+    try {
+      await stream.submit(
+        { messages: [...toolMessages, newHumanMessage], context },
+        {
+          streamMode: ["values"],
+          config: {
+            configurable: {
+              user_id: effectiveUserId,
+              client_country: "AU",
+            }
+          },
+          optimisticValues: (prev) => ({
+            ...prev,
+            context,
+            metadata: {
+              userId: effectiveUserId,
+            },
+            messages: [...(prev.messages ?? []), ...toolMessages, newHumanMessage],
+          }),
+        }
+      );
+      console.log("Thread: Message submitted successfully");
+    } catch (error) {
+      console.error("Thread: Error submitting message:", error);
+      toast.error("Failed to submit message. Please try again.");
+    }
 
     setInput("");
     setContentBlocks([]);
   };
 
-  const handleRegenerate = (
-    parentCheckpoint: Checkpoint | null | undefined,
-  ) => {
-    // Do this so the loading state is correct
+  const handleRegenerate = (parentCheckpoint: Checkpoint | null | undefined) => {
     prevMessageLength.current = prevMessageLength.current - 1;
     setFirstTokenReceived(false);
     stream.submit(undefined, {
@@ -231,7 +212,7 @@ export function Thread() {
 
   const chatStarted = !!threadId || !!messages.length;
   const hasNoAIOrToolMessages = !messages.find(
-    (m) => m.type === "ai" || m.type === "tool",
+    (m) => m.type === "ai" || m.type === "tool"
   );
 
   return (
@@ -240,52 +221,25 @@ export function Thread() {
         <motion.div
           className="absolute z-20 h-full overflow-hidden border-r bg-white"
           style={{ width: 300 }}
-          animate={
-            isLargeScreen
-              ? { x: chatHistoryOpen ? 0 : -300 }
-              : { x: chatHistoryOpen ? 0 : -300 }
-          }
+          animate={isLargeScreen ? { x: chatHistoryOpen ? 0 : -300 } : { x: chatHistoryOpen ? 0 : -300 }}
           initial={{ x: -300 }}
-          transition={
-            isLargeScreen
-              ? { type: "spring", stiffness: 300, damping: 30 }
-              : { duration: 0 }
-          }
+          transition={isLargeScreen ? { type: "spring", stiffness: 300, damping: 30 } : { duration: 0 }}
         >
-          <div
-            className="relative h-full"
-            style={{ width: 300 }}
-          >
+          <div className="relative h-full" style={{ width: 300 }}>
             <ThreadHistory />
           </div>
         </motion.div>
       </div>
 
-      <div
-        className={cn(
-          "grid w-full grid-cols-[1fr_0fr] transition-all duration-500",
-          artifactOpen && "grid-cols-[3fr_2fr]",
-        )}
-      >
+      <div className={cn("grid w-full grid-cols-[1fr_0fr] transition-all duration-500", artifactOpen && "grid-cols-[3fr_2fr]")}>
         <motion.div
-          className={cn(
-            "relative flex min-w-0 flex-1 flex-col overflow-hidden",
-            !chatStarted && "grid-rows-[1fr]",
-          )}
+          className={cn("relative flex min-w-0 flex-1 flex-col overflow-hidden", !chatStarted && "grid-rows-[1fr]")}
           layout={isLargeScreen}
           animate={{
             marginLeft: chatHistoryOpen ? (isLargeScreen ? 300 : 0) : 0,
-            width: chatHistoryOpen
-              ? isLargeScreen
-                ? "calc(100% - 300px)"
-                : "100%"
-              : "100%",
+            width: chatHistoryOpen ? (isLargeScreen ? "calc(100% - 300px)" : "100%") : "100%",
           }}
-          transition={
-            isLargeScreen
-              ? { type: "spring", stiffness: 300, damping: 30 }
-              : { duration: 0 }
-          }
+          transition={isLargeScreen ? { type: "spring", stiffness: 300, damping: 30 } : { duration: 0 }}
         >
           {!chatStarted && (
             <div className="absolute top-0 left-0 z-10 flex w-full items-center justify-between gap-3 p-2 pl-4">
@@ -296,15 +250,10 @@ export function Thread() {
                     variant="ghost"
                     onClick={() => setChatHistoryOpen((p) => !p)}
                   >
-                    {chatHistoryOpen ? (
-                      <PanelRightOpen className="size-5" />
-                    ) : (
-                      <PanelRightClose className="size-5" />
-                    )}
+                    {chatHistoryOpen ? <PanelRightOpen className="size-5" /> : <PanelRightClose className="size-5" />}
                   </Button>
                 )}
               </div>
-              
               <div className="flex items-center gap-2 pr-2">
                 <ThemeSwitcher />
                 <AuthUserButton />
@@ -321,32 +270,19 @@ export function Thread() {
                       variant="ghost"
                       onClick={() => setChatHistoryOpen((p) => !p)}
                     >
-                      {chatHistoryOpen ? (
-                        <PanelRightOpen className="size-5" />
-                      ) : (
-                        <PanelRightClose className="size-5" />
-                      )}
+                      {chatHistoryOpen ? <PanelRightOpen className="size-5" /> : <PanelRightClose className="size-5" />}
                     </Button>
                   )}
                 </div>
                 <motion.button
                   className="flex cursor-pointer items-center gap-2"
                   onClick={() => setThreadId(null)}
-                  animate={{
-                    marginLeft: !chatHistoryOpen ? 48 : 0,
-                  }}
-                  transition={{
-                    type: "spring",
-                    stiffness: 300,
-                    damping: 30,
-                  }}
+                  animate={{ marginLeft: !chatHistoryOpen ? 48 : 0 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 30 }}
                 >
-                  <BookedLogoSVG
-                    height={32}
-                  />
+                  <BookedLogoSVG height={32} />
                 </motion.button>
               </div>
-
               <div className="flex items-center gap-4">
                 <ThemeSwitcher />
                 <AuthUserButton />
@@ -360,19 +296,17 @@ export function Thread() {
                   <SquarePen className="size-5" />
                 </TooltipIconButton>
               </div>
-
               <div className="from-background to-background/0 absolute inset-x-0 top-full h-5 bg-gradient-to-b" />
             </div>
           )}
-
           <StickToBottom className="relative flex-1 overflow-hidden">
             <StickyToBottomContent
               className={cn(
                 "absolute inset-0 overflow-y-scroll px-4 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-track]:bg-transparent",
                 !chatStarted && "mt-[25vh] flex flex-col items-stretch",
-                chatStarted && "grid grid-rows-[1fr_auto]",
+                chatStarted && "grid grid-rows-[1fr_auto]"
               )}
-              contentClassName="pt-8 pb-16  max-w-3xl mx-auto flex flex-col gap-4 w-full"
+              contentClassName="pt-8 pb-16 max-w-3xl mx-auto flex flex-col gap-4 w-full"
               content={
                 <>
                   {messages
@@ -391,10 +325,8 @@ export function Thread() {
                           isLoading={isLoading}
                           handleRegenerate={handleRegenerate}
                         />
-                      ),
+                      )
                     )}
-                  {/* Special rendering case where there are no AI/tool messages, but there is an interrupt.
-                    We need to render it outside of the messages list, since there are no messages to render */}
                   {hasNoAIOrToolMessages && !!stream.interrupt && (
                     <AssistantMessage
                       key="interrupt-msg"
@@ -403,9 +335,7 @@ export function Thread() {
                       handleRegenerate={handleRegenerate}
                     />
                   )}
-                  {isLoading && !firstTokenReceived && (
-                    <AssistantMessageLoading />
-                  )}
+                  {isLoading && !firstTokenReceived && <AssistantMessageLoading />}
                 </>
               }
               footer={
@@ -415,37 +345,22 @@ export function Thread() {
                       <BookedLogoSVG className="flex-shrink-0" height={48} />
                     </div>
                   )}
-
                   <ScrollToBottom className="animate-in fade-in-0 zoom-in-95 absolute bottom-full left-1/2 mb-4 -translate-x-1/2" />
-
                   <div
                     ref={dropRef}
                     className={cn(
                       "bg-muted relative z-10 mx-auto mb-8 w-full max-w-3xl rounded-2xl shadow-xs transition-all",
-                      dragOver
-                        ? "border-primary border-2 border-dotted"
-                        : "border border-solid",
+                      dragOver ? "border-primary border-2 border-dotted" : "border border-solid"
                     )}
                   >
-                    <form
-                      onSubmit={handleSubmit}
-                      className="mx-auto grid max-w-3xl grid-rows-[1fr_auto] gap-2"
-                    >
-                      <ContentBlocksPreview
-                        blocks={contentBlocks}
-                        onRemove={removeBlock}
-                      />
+                    <form onSubmit={handleSubmit} className="mx-auto grid max-w-3xl grid-rows-[1fr_auto] gap-2">
+                      <ContentBlocksPreview blocks={contentBlocks} onRemove={removeBlock} />
                       <textarea
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         onPaste={handlePaste}
                         onKeyDown={(e) => {
-                          if (
-                            e.key === "Enter" &&
-                            !e.shiftKey &&
-                            !e.metaKey &&
-                            !e.nativeEvent.isComposing
-                          ) {
+                          if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.nativeEvent.isComposing) {
                             e.preventDefault();
                             const el = e.target as HTMLElement | undefined;
                             const form = el?.closest("form");
@@ -455,7 +370,6 @@ export function Thread() {
                         placeholder="Type your message..."
                         className="field-sizing-content resize-none border-none bg-transparent p-3.5 pb-0 shadow-none ring-0 outline-none focus:ring-0 focus:outline-none"
                       />
-
                       <div className="flex items-center gap-6 p-2 pt-4">
                         <div>
                           <div className="flex items-center space-x-2">
@@ -464,22 +378,14 @@ export function Thread() {
                               checked={hideToolCalls ?? false}
                               onCheckedChange={setHideToolCalls}
                             />
-                            <Label
-                              htmlFor="render-tool-calls"
-                              className="text-sm text-gray-600"
-                            >
+                            <Label htmlFor="render-tool-calls" className="text-sm text-gray-600">
                               Hide Tool Calls
                             </Label>
                           </div>
                         </div>
-                        <Label
-                          htmlFor="file-input"
-                          className="flex cursor-pointer items-center gap-2"
-                        >
+                        <Label htmlFor="file-input" className="flex cursor-pointer items-center gap-2">
                           <Plus className="size-5 text-gray-600" />
-                          <span className="text-sm text-gray-600">
-                            Upload PDF or Image
-                          </span>
+                          <span className="text-sm text-gray-600">Upload PDF or Image</span>
                         </Label>
                         <input
                           id="file-input"
@@ -490,11 +396,7 @@ export function Thread() {
                           className="hidden"
                         />
                         {stream.isLoading ? (
-                          <Button
-                            key="stop"
-                            onClick={() => stream.stop()}
-                            className="ml-auto"
-                          >
+                          <Button key="stop" onClick={() => stream.stop()} className="ml-auto">
                             <LoaderCircle className="h-4 w-4 animate-spin" />
                             Cancel
                           </Button>
@@ -502,10 +404,7 @@ export function Thread() {
                           <Button
                             type="submit"
                             className="ml-auto shadow-md transition-all"
-                            disabled={
-                              isLoading ||
-                              (!input.trim() && contentBlocks.length === 0)
-                            }
+                            disabled={isLoading || (!input.trim() && contentBlocks.length === 0)}
                           >
                             Send
                           </Button>
@@ -522,10 +421,7 @@ export function Thread() {
           <div className="absolute inset-0 flex min-w-[30vw] flex-col">
             <div className="grid grid-cols-[1fr_auto] border-b p-4">
               <ArtifactTitle className="truncate overflow-hidden" />
-              <button
-                onClick={closeArtifact}
-                className="cursor-pointer"
-              >
+              <button onClick={closeArtifact} className="cursor-pointer">
                 <XIcon className="size-5" />
               </button>
             </div>

@@ -12,7 +12,7 @@ import {
   SetStateAction,
 } from "react";
 import { createClient } from "./client";
-
+import { useAuth } from "@clerk/nextjs";
 
 interface ThreadContextType {
   getThreads: () => Promise<Thread[]>;
@@ -25,7 +25,7 @@ interface ThreadContextType {
 const ThreadContext = createContext<ThreadContextType | undefined>(undefined);
 
 function getThreadSearchMetadata(
-  assistantId: string,
+  assistantId: string
 ): { graph_id: string } | { assistant_id: string } {
   if (validate(assistantId)) {
     return { assistant_id: assistantId };
@@ -35,24 +35,52 @@ function getThreadSearchMetadata(
 }
 
 export function ThreadProvider({ children }: { children: ReactNode }) {
-  const [apiUrl] = useQueryState("apiUrl");
-  const [assistantId] = useQueryState("assistantId");
+  // const [apiUrl] = useQueryState("apiUrl");
+  // const [assistantId] = useQueryState("assistantId");
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? null;
+  const assistantId = process.env.NEXT_PUBLIC_ASSISTANT_ID ?? null;
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadsLoading, setThreadsLoading] = useState(false);
+  const { userId, isSignedIn } = useAuth();
 
   const getThreads = useCallback(async (): Promise<Thread[]> => {
-    if (!apiUrl || !assistantId) return [];
+    if (!apiUrl || !assistantId) {
+      console.log("ThreadProvider: Missing apiUrl or assistantId, returning empty threads");
+      return [];
+    }
     const client = createClient(apiUrl, getApiKey() ?? undefined);
 
-    const threads = await client.threads.search({
-      metadata: {
-        ...getThreadSearchMetadata(assistantId),
-      },
-      limit: 100,
-    });
+    try {
+      const effectiveUserId = userId || "guest";
 
-    return threads;
-  }, [apiUrl, assistantId]);
+      const searchMetadata = {
+        ...getThreadSearchMetadata(assistantId),
+        headers: { "X-User-ID": effectiveUserId },
+      };      
+
+      const threads = await client.threads.search({
+        metadata: searchMetadata,
+        limit: 100,
+      });
+
+      // Fallback: If no threads are found and userId is not 'guest', try fetching without userId filter
+      if (threads.length === 0 && userId && userId !== "guest") {
+        console.log("ThreadProvider: No threads found for userId, attempting fallback fetch without userId filter");
+        const fallbackThreads = await client.threads.search({
+          metadata: {
+            ...getThreadSearchMetadata(assistantId),            
+          },
+          limit: 100,
+        });
+        return fallbackThreads;
+      }
+
+      return threads;
+    } catch (error) {
+      console.error("ThreadProvider: Error fetching threads:", error);
+      return [];
+    }
+  }, [apiUrl, assistantId, userId]);
 
   const value = {
     getThreads,
@@ -62,9 +90,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     setThreadsLoading,
   };
 
-  return (
-    <ThreadContext.Provider value={value}>{children}</ThreadContext.Provider>
-  );
+  return <ThreadContext.Provider value={value}>{children}</ThreadContext.Provider>;
 }
 
 export function useThreads() {

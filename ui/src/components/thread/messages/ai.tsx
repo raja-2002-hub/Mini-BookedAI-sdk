@@ -23,17 +23,11 @@ function CustomComponent({
   thread: ReturnType<typeof useStreamContext>;
 }) {
   const artifact = useArtifact();
-  const { values } = useStreamContext();
-  
-  console.log(`[UI RENDER] Checking for UI components for message ${message.id}`);
-  console.log("[UI RENDER] Total UI messages:", values.ui?.length || 0);
-  console.log("[UI RENDER] All UI messages:", values.ui);
+  const { values } = useStreamContext();  
   
   const customComponents = values.ui?.filter(
     (ui) => ui.metadata?.message_id === message.id,
   );
-
-  console.log(`[UI RENDER] Found ${customComponents?.length || 0} UI components for message ${message.id}`);
   
   if (customComponents?.length) {
     console.log("[UI RENDER] UI components to render:", customComponents);
@@ -43,7 +37,6 @@ function CustomComponent({
   return (
     <Fragment key={message.id}>
       {customComponents.map((customComponent) => {
-        console.log(`[UI RENDER] Rendering UI component:`, customComponent);
         return (
           <LoadExternalComponent
             key={customComponent.id}

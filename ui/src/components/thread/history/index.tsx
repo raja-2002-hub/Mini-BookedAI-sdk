@@ -2,7 +2,6 @@ import { Button } from "@/components/ui/button";
 import { useThreads } from "@/providers/Thread";
 import { Thread } from "@langchain/langgraph-sdk";
 import { useEffect } from "react";
-
 import { getContentString } from "../utils";
 import { useQueryState, parseAsBoolean } from "nuqs";
 import {
@@ -26,38 +25,41 @@ function ThreadList({
 
   return (
     <div className="flex h-full w-full flex-col items-start justify-start gap-2 overflow-y-scroll [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-track]:bg-transparent">
-      {threads.map((t) => {
-        let itemText = t.thread_id;
-        if (
-          typeof t.values === "object" &&
-          t.values &&
-          "messages" in t.values &&
-          Array.isArray(t.values.messages) &&
-          t.values.messages?.length > 0
-        ) {
-          const firstMessage = t.values.messages[0];
-          itemText = getContentString(firstMessage.content);
-        }
-        return (
-          <div
-            key={t.thread_id}
-            className="w-full px-1"
-          >
-            <Button
-              variant="ghost"
-              className="w-[280px] items-start justify-start text-left font-normal"
-              onClick={(e) => {
-                e.preventDefault();
-                onThreadClick?.(t.thread_id);
-                if (t.thread_id === threadId) return;
-                setThreadId(t.thread_id);
-              }}
-            >
-              <p className="truncate text-ellipsis">{itemText}</p>
-            </Button>
-          </div>
-        );
-      })}
+      {threads.length === 0 ? (
+        <div className="w-full px-4 py-2 text-gray-500">
+          No threads found. Start a new conversation to create a thread.
+        </div>
+      ) : (
+        threads.map((t) => {
+          let itemText = t.thread_id;
+          if (
+            typeof t.values === "object" &&
+            t.values &&
+            "messages" in t.values &&
+            Array.isArray(t.values.messages) &&
+            t.values.messages?.length > 0
+          ) {
+            const firstMessage = t.values.messages[0];
+            itemText = getContentString(firstMessage.content);
+          }
+          return (
+            <div key={t.thread_id} className="w-full px-1">
+              <Button
+                variant="ghost"
+                className="w-[280px] items-start justify-start text-left font-normal"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onThreadClick?.(t.thread_id);
+                  if (t.thread_id === threadId) return;
+                  setThreadId(t.thread_id);
+                }}
+              >
+                <p className="truncate text-ellipsis">{itemText}</p>
+              </Button>
+            </div>
+          );
+        })
+      )}
     </div>
   );
 }
@@ -66,10 +68,7 @@ function ThreadHistoryLoading() {
   return (
     <div className="flex h-full w-full flex-col items-start justify-start gap-2 overflow-y-scroll [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-track]:bg-transparent">
       {Array.from({ length: 30 }).map((_, i) => (
-        <Skeleton
-          key={`skeleton-${i}`}
-          className="h-10 w-[280px]"
-        />
+        <Skeleton key={`skeleton-${i}`} className="h-10 w-[280px]" />
       ))}
     </div>
   );
@@ -79,20 +78,24 @@ export default function ThreadHistory() {
   const isLargeScreen = useMediaQuery("(min-width: 1024px)");
   const [chatHistoryOpen, setChatHistoryOpen] = useQueryState(
     "chatHistoryOpen",
-    parseAsBoolean.withDefault(false),
+    parseAsBoolean.withDefault(false)
   );
-
   const { getThreads, threads, setThreads, threadsLoading, setThreadsLoading } =
     useThreads();
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    console.log("ThreadHistory: Starting thread fetch");
     setThreadsLoading(true);
     getThreads()
-      .then(setThreads)
-      .catch(console.error)
+      .then((fetchedThreads) => {
+        setThreads(fetchedThreads);
+      })
+      .catch((error) => {
+        console.error("ThreadHistory: Error fetching threads:", error);
+      })
       .finally(() => setThreadsLoading(false));
-  }, []);
+  }, [getThreads, setThreads, setThreadsLoading]);
 
   return (
     <>
@@ -127,10 +130,7 @@ export default function ThreadHistory() {
             setChatHistoryOpen(open);
           }}
         >
-          <SheetContent
-            side="left"
-            className="flex lg:hidden"
-          >
+          <SheetContent side="left" className="flex lg:hidden">
             <SheetHeader>
               <SheetTitle>Thread History</SheetTitle>
             </SheetHeader>

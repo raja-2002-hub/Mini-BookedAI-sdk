@@ -114,16 +114,11 @@ const StreamSession = ({
     threadId: threadId ?? null,
     defaultHeaders: undefined as any,
     onCustomEvent: (event, options) => {
-      console.log("[STREAM] Custom event received:", event);
       
       if (isUIMessage(event) || isRemoveUIMessage(event)) {
-        console.log("[STREAM] ✓ UI Message detected");
-        console.log("[STREAM] UI Message data:", event);
         
         options.mutate((prev) => {
           const ui = uiMessageReducer(prev.ui ?? [], event);
-          console.log("[STREAM] UI state before:", prev.ui);
-          console.log("[STREAM] UI state after:", ui);
           return { ...prev, ui };
         });
         

@@ -5,9 +5,10 @@ description = "LangGraph Agent for BookedAI"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "asyncpg>=0.30.0",
     "langgraph>=0.4.8",
     "langgraph-cli>=0.3.0",
-    "langgraph-api>=0.0.12",
+    "langgraph-api>=0.4.23",
     "langgraph-checkpoint-postgres>=0.2.0", # PostgreSQL checkpointer
     "psycopg2-binary>=2.9.0",  # PostgreSQL adapter
     "langchain>=0.3.0",
