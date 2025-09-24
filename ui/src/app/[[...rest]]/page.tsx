@@ -5,7 +5,7 @@ import { StreamProvider } from "@/providers/Stream";
 import { ThreadProvider } from "@/providers/Thread";
 import { ArtifactProvider } from "@/components/thread/artifact";
 import { Toaster } from "@/components/ui/sonner";
-import { useAuth } from "@clerk/nextjs";
+import { useAuth, useUser } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
 import React from "react";
 
@@ -22,24 +22,50 @@ function AppContent() {
 }
 
 export default function CatchAllPage(): React.ReactNode {
-  const { isSignedIn, isLoaded } = useAuth();
+  const { isSignedIn, isLoaded, sessionId } = useAuth();
+  const { user } = useUser();
   const [showGuestMode, setShowGuestMode] = React.useState(false);
   const router = useRouter();
 
-  // Check sessionStorage for guest mode on component mount
+  // Check authentication state and guest mode with session sync delay
   React.useEffect(() => {
-    const guestMode = sessionStorage.getItem('guestMode');
-    if (guestMode === 'true') {
-      setShowGuestMode(true);
-    }
-  }, []);
+    // Delay to ensure Clerk session sync
+    const timer = setTimeout(() => {
+      console.log('Auth Debug:', {
+        isLoaded,
+        isSignedIn,
+        sessionId,
+        user: user
+          ? {
+              id: user.id,
+              firstName: user.firstName,
+              emailAddresses: user.emailAddresses.map(email => email.emailAddress),
+              externalAccounts: user.externalAccounts.map(account => ({
+                provider: account.provider,
+                emailAddress: account.emailAddress,
+              })),
+            }
+          : null,
+        showGuestMode,
+        guestModeFromStorage: sessionStorage.getItem('guestMode'),
+      });
 
-  // Redirect to sign-in page for non-authenticated users
-  React.useEffect(() => {
-    if (isLoaded && !isSignedIn && !showGuestMode) {
-      router.push('/sign-in');
-    }
-  }, [isLoaded, isSignedIn, showGuestMode, router]);
+      if (isLoaded) {
+        if (isSignedIn) {
+          sessionStorage.removeItem('guestMode');
+          setShowGuestMode(false);
+        } else {
+          const guestMode = sessionStorage.getItem('guestMode') === 'true';
+          setShowGuestMode(guestMode);
+          if (!guestMode) {
+            router.push('/sign-in');
+          }
+        }
+      }
+    }, 500); // Wait 0.5s for session sync
+
+    return () => clearTimeout(timer);
+  }, [isLoaded, isSignedIn, user, sessionId, router]);
 
   if (!isLoaded) {
     return (

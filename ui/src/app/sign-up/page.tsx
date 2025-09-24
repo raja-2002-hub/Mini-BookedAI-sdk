@@ -19,6 +19,11 @@ export default function SignUpPage() {
         <SignUp 
           routing="path"
           path="/sign-up"
+          signInUrl="/sign-in"
+          fallbackRedirectUrl="/"
+          forceRedirectUrl="/"
+          afterSignInUrl="/"
+          afterSignUpUrl="/"
           appearance={{
             elements: {
               formButtonPrimary: 
@@ -31,9 +36,11 @@ export default function SignUpPage() {
               formFieldInput: 
                 "border border-gray-300 focus:border-blue-500 dark:border-gray-600 dark:focus:border-blue-400",
               footerActionLink: "text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300",
+              // Removed 'captcha: "block"' to prevent init warning; fallback to invisible
             },
           }}
         />
+        <div id="clerk-captcha"></div>
         <div className="mt-6 text-center relative z-10 w-full max-w-[400px]">
           <Button 
             onClick={handleGuestMode}
