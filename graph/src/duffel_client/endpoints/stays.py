@@ -710,6 +710,37 @@ class StaysEndpoint:
         reviews = response.get("data", {}).get("reviews", [])
         return [AccommodationReview(**r) for r in reviews]
     
+    async def fetch_loyalty_programmes(self) -> list:
+        """Fetch all loyalty programmes supported by Duffel Stays."""
+        try:
+            response = await self.client.get("/stays/loyalty_programmes")
+            # Parse into LoyaltyProgramme models
+            from ..models.stays import LoyaltyProgramme
+            data = response.get("data", [])
+            return [LoyaltyProgramme(**item) for item in data]
+        except Exception as e:
+            logger.error(f"Error fetching loyalty programmes: {e}")
+            raise DuffelAPIError({
+                'type': 'client_error',
+                'title': 'Loyalty programme fetch failed',
+                'detail': str(e)
+            })
+    
+    async def fetch_accommodation_reviews(self, accommodation_id: str, after: str = None, before: str = None, limit: int = 50) -> list:
+        """
+        Fetch guest reviews for an accommodation.
+        """
+        endpoint = f"/stays/accommodation/{accommodation_id}/reviews"
+        params = {"limit": limit}
+        if after:
+            params["after"] = after
+        if before:
+            params["before"] = before
+        response = await self.client.get(endpoint, params=params)
+        from ..models.stays import AccommodationReview
+        reviews = response.get("data", {}).get("reviews", [])
+        return [AccommodationReview(**r) for r in reviews]
+    
     def _parse_hotels_response(self, response_data: Dict[str, Any]) -> List[Hotel]:
         """Parse Duffel API response into Hotel models.
         

@@ -617,12 +617,10 @@ async def create_flight_booking(offer_id: str, passengers: list, payments: list,
     if services:
         order_data["services"] = services  # Add seat selections if provided
 
-    # 4. Attempt booking
-
-    
     # 4. Add services if provided (following Duffel API structure)
     if services and len(services) > 0:
         order_data["services"] = services
+    
     try:
         logger.info(f"Booking flight with order data: {order_data}")
         return await endpoint.book_flight(order_data)

@@ -8,6 +8,7 @@ from collections import deque
 import logging
 import asyncio
 from datetime import date, datetime
+from uuid import uuid4
 import phonenumbers
 from phonenumbers.phonenumberutil import NumberParseException
 import httpx
@@ -45,6 +46,8 @@ from src.duffel_client.endpoints.stays import search_hotels, fetch_hotel_rates, 
 from src.duffel_client.endpoints.flights import search_flights, format_flights_markdown, get_seat_maps,fetch_flight_offer, create_flight_booking, list_airline_initiated_changes, update_airline_initiated_change, accept_airline_initiated_change
 from src.duffel_client.client import DuffelAPIError
 from src.config import config
+from mem0 import AsyncMemoryClient
+
 
 
 # --- Flight Order Change Tools ---
@@ -63,6 +66,39 @@ from src.duffel_client.endpoints.payments import (
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+
+
+class UserIDManager:
+    """Simple class to manage the current user ID for mem0 operations."""
+    
+    def __init__(self):
+        self._current_user_id = None  # No default fallback
+        logger.info(f"[USER MANAGER] Initialized with no default user ID")
+    
+    @property
+    def current_user_id(self) -> str:
+        if self._current_user_id is None:
+            # If no user ID is set, we should fail rather than use a default
+            raise ValueError("No user ID has been set. Headers must contain X-User-ID.")
+        return self._current_user_id
+    
+    @current_user_id.setter
+    def current_user_id(self, user_id: str):
+        self._current_user_id = user_id
+        logger.info(f"[USER MANAGER] Updated user ID to: {user_id}")
+    
+    def get_user_id(self) -> str:
+        return self.current_user_id
+
+# Global instance of the user ID manager
+user_id_manager = UserIDManager()
+
+# Global user metadata storage for mem0
+global_user_metadata = {}
+
+def get_current_user_id() -> str:
+    """Get the current user ID for mem0 operations."""
+    return user_id_manager.current_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +127,7 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]  
     ui: Annotated[Sequence[AnyUIMessage], ui_message_reducer]
     ui_enabled: Optional[bool]
+    context_prepared: Optional[bool]  # Track if context has been prepared
     booking_intent: Optional[bool]
     current_agent: Optional[str]    
 
@@ -298,7 +335,7 @@ async def search_hotels_tool(
 
     Location and dates are required, while the number of adults and children is optional. If not provided, the search will assume 1 adult and 0 children—no need to ask the user or mention these defaults unless you're quoting or booking.
 
-    Check-in and check-out dates can be entered in natural language or standard formats, but they must resolve to future dates. If a past date is given, it’ll be automatically adjusted to the next valid future date. The check-out date must always be after the check-in date, or an error will be returned.
+    Check-in and check-out dates can be entered in natural language or standard formats, but they must resolve to future dates. If a past date is given, it'll be automatically adjusted to the next valid future date. The check-out date must always be after the check-in date, or an error will be returned.
 
     If any required information is missing (except adults or children), ask the user for clarification.
 
@@ -1630,6 +1667,8 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
         fetch_extra_baggage_options_tool,
         get_available_services_tool,
         fetch_accommodation_reviews_tool,
+        remember_tool,
+        recall_tool,
         extend_hotel_stay_tool
     ]
     llm_with_tools = llm.bind_tools(tools)
@@ -1650,6 +1689,10 @@ You are Luna, a knowledgeable and personable AI travel consultant for BookedAI. 
 <instructions>
 Act as a proactive travel consultant who builds a complete understanding of each traveler's unique needs before making recommendations. Guide users through a personalized consultation process to uncover their ideal trip.
 </instructions>
+
+ <memory_instructions>
+ Store user preferences with remember_tool when they mention likes/dislikes, including food preferences, travel preferences, and personal preferences that could be relevant for travel planning. Remember user preferences (food, activities, etc.) that could be relevant for travel planning. When searching for preferences, use recall_tool with specific terms from the user's request (e.g., "paris", "melbourne", "window seat") along with generic queries. Use recall_tool when you need to search for existing memories, but don't call it after remember_tool unless specifically needed.
+ </memory_instructions>
 
 <response_format>
 When providing recommendations:
@@ -1726,12 +1769,9 @@ Since rich UI components (hotel cards, flight results, etc.) will be displayed t
     response = llm_with_tools.invoke(messages)
 
     ui_enabled = state.get("ui_enabled", True)
-    logger.info(f"UI enabled: {ui_enabled}")
-
+    
     # Handle push UI message with improved logic for multiple tool calls
-    logger.info(f"[UI PROCESSING] Starting UI component processing - UI enabled: {ui_enabled}")
     if ui_enabled:
-        logger.info(f"[UI PROCESSING] Total messages in state: {len(state['messages'])}")
         
         # Find all recent tool messages that could need UI components
         # Look for tool messages that came after the last human/AI message
@@ -1751,71 +1791,36 @@ Since rich UI components (hotel cards, flight results, etc.) will be displayed t
                 # Stop when we hit a non-tool message (start of this tool sequence)
                 break
         
-        logger.info(f"[UI PROCESSING] Found {len(recent_tool_messages)} recent tool messages to process for UI")
-        
-        # Log details of each tool message found
-        for idx, tool_msg in enumerate(recent_tool_messages):
-            logger.debug(f"[UI PROCESSING] Tool message {idx}: name={tool_msg.name}, content_length={len(tool_msg.content)}")
-        
         # Process each tool message for potential UI
         ui_components_created = 0
         for idx, tool_message in enumerate(recent_tool_messages):
-            logger.info(f"[UI PROCESSING] Processing tool message {idx+1}/{len(recent_tool_messages)}: {tool_message.name}")
-            
             try:
                 # Parse tool result data
-                logger.debug(f"[UI PROCESSING] Parsing JSON content from {tool_message.name}")
                 tool_data = json.loads(tool_message.content)
-                logger.info(f"[UI PROCESSING] Successfully parsed JSON for {tool_message.name} - data type: {type(tool_data)}")
-                
-                # Log a sample of the data structure (safely)
-                if isinstance(tool_data, dict):
-                    logger.debug(f"[UI PROCESSING] Data keys for {tool_message.name}: {list(tool_data.keys())}")
-                    # Log size of main data arrays if present
-                    for key in ['hotels', 'flights', 'results']:
-                        if key in tool_data and isinstance(tool_data[key], list):
-                            logger.info(f"[UI PROCESSING] {tool_message.name} has {len(tool_data[key])} items in '{key}' array")
                 
                 # Use decision function to determine if UI should be pushed
-                logger.info(f"[UI PROCESSING] Calling should_push_ui_message for {tool_message.name}")
                 should_push, ui_type = should_push_ui_message(tool_message, tool_data)
-                logger.info(f"[UI PROCESSING] Decision for {tool_message.name}: should_push={should_push}, ui_type={ui_type}")
                 
                 if should_push and ui_type:
-                    logger.info(f"[UI PROCESSING] ✓ Pushing UI message for {ui_type} from tool {tool_message.name}")
-                    logger.debug(f"[UI PROCESSING] UI data summary - type: {ui_type}, data_fields: {len(tool_data) if isinstance(tool_data, dict) else 'N/A'}")
-                    
                     # Attempt the actual UI push
                     try:
-                        logger.debug(f"[UI PROCESSING] Calling push_ui_message with ui_type='{ui_type}'")
                         push_ui_message(ui_type, tool_data, message=response)
                         ui_components_created += 1
-                        logger.info(f"[UI PROCESSING] ✓ Successfully pushed UI component #{ui_components_created} for {tool_message.name}")
                     except Exception as push_error:
                         logger.error(f"[UI PROCESSING] ✗ Failed to push UI component for {tool_message.name}: {push_error}", exc_info=True)
-                        logger.error(f"[UI PROCESSING] Push error details - ui_type: {ui_type}, data_type: {type(tool_data)}")
-                    
-                else:
-                    logger.info(f"[UI PROCESSING] ✗ Not pushing UI for {tool_message.name}: should_push={should_push}, ui_type={ui_type}")
                     
             except json.JSONDecodeError as e:
                 logger.warning(f"[UI PROCESSING] ✗ Failed to parse tool result as JSON for UI from {tool_message.name}: {e}")
-                logger.debug(f"[UI PROCESSING] Raw content (first 200 chars): {tool_message.content[:200]}...")
             except Exception as e:
                 logger.error(f"[UI PROCESSING] ✗ Unexpected error processing UI message for {tool_message.name}: {e}", exc_info=True)
         
-        logger.info(f"[UI PROCESSING] UI processing complete - created {ui_components_created} UI components")
-        
         if ui_components_created > 0:
-            logger.info(f"[UI PROCESSING] ✓ Successfully created {ui_components_created} UI components for this agent response")
-            # Optionally modify the text response to be more concise since UI will show details
-            logger.debug("[UI PROCESSING] UI components will show detailed results, text response will be concise")
+            logger.debug(f"[UI PROCESSING] ✓ Created {ui_components_created} UI components")
         else:
-            logger.info(f"[UI PROCESSING] No UI components created - all {len(recent_tool_messages)} tool messages were rejected for UI display")
+            logger.debug(f"[UI PROCESSING] No UI components created")
     else:
-        logger.info("[UI PROCESSING] UI disabled - skipping all UI component processing")
+        logger.debug("[UI PROCESSING] UI disabled - skipping UI component processing")
 
-    logger.info("[UI PROCESSING] Agent node completed, returning response")
     return {"messages": [response]}
 
 
@@ -1827,7 +1832,341 @@ def human_input_node(state: AgentState) -> Dict[str, Any]:
     raise GraphInterrupt("Please provide additional input or guidance for the agent.")
 
 
- # context_preparation node removed
+async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
+    logger.info("Context preparation started - Hybrid approach (checkpointer + mem0)")
+    
+    # Debug logging (reduced verbosity for performance)
+    logger.debug(f"State keys: {list(state.keys())}")
+    logger.debug(f"Configurable: {state.get('configurable', {})}")
+    logger.debug(f"Metadata: {state.get('metadata', {})}")
+    logger.debug(f"Headers in state: {state.get('headers', 'NOT_FOUND')}")
+    # Removed full state logging to improve performance
+    
+    # Try to access user_id from the request body directly
+    # The bodyParameters function should have injected it
+    try:
+        # Check if there's a request body in the state
+        if 'request_body' in state:
+            request_body = state.get('request_body', {})
+            logger.debug(f"🔍 [AUTH DEBUG] Request body: {request_body}")
+            if isinstance(request_body, dict) and 'configurable' in request_body:
+                body_configurable = request_body.get('configurable', {})
+                logger.debug(f"🔍 [AUTH DEBUG] Body configurable: {body_configurable}")
+                if 'user_id' in body_configurable:
+                    logger.debug(f"🔍 [AUTH DEBUG] Found user_id in request body: {body_configurable['user_id']}")
+        
+        # Check if user_id is directly in the state (from bodyParameters injection)
+        state_user_id = state.get('user_id')
+        if state_user_id:
+            logger.debug(f"🔍 [AUTH DEBUG] Found user_id directly in state: {state_user_id}")
+            
+        # Check if authenticated is in state
+        state_authenticated = state.get('authenticated')
+        if state_authenticated:
+            logger.debug(f"🔍 [AUTH DEBUG] Found authenticated directly in state: {state_authenticated}")
+            
+        # Check messages for user_id/authenticated in additional_kwargs (scan most recent first)
+        messages = state.get('messages', [])
+        message_user_id = None
+        message_authenticated = None
+        if isinstance(messages, list) and messages:
+            for message in reversed(messages):
+                try:
+                    additional = getattr(message, 'additional_kwargs', None)
+                    if isinstance(additional, dict):
+                        if message_user_id is None and 'user_id' in additional:
+                            message_user_id = additional.get('user_id')
+                        if message_authenticated is None and 'authenticated' in additional:
+                            message_authenticated = additional.get('authenticated')
+                        if message_user_id is not None or message_authenticated is not None:
+                            logger.info(f"🔍 [AUTH DEBUG] Found in recent message - user_id: {message_user_id}, authenticated: {message_authenticated}")
+                            break
+                except Exception:
+                    continue
+            
+    except Exception as e:
+        logger.debug(f"Could not access request body: {e}")
+    
+    # Get conversation context from checkpointer (if available)
+    conversation_context = ""
+    try:
+        # Access checkpointer through the graph's configuration
+        configurable = state.get("configurable", {})
+        thread_id = configurable.get("thread_id")
+        if thread_id:
+            # Get recent conversation history for context
+            messages = state.get("messages", [])
+            if len(messages) > 1:
+                # Get last few messages for conversation context
+                recent_messages = messages[-3:] if len(messages) >= 3 else messages
+                conversation_context = "Recent conversation context: " + "; ".join([
+                    f"{msg.type}: {getattr(msg, 'content', '')[:100]}" 
+                    for msg in recent_messages if hasattr(msg, 'content')
+                ])
+                logger.info(f"📚 [HYBRID] Retrieved conversation context: {len(conversation_context)} chars")
+    except Exception as e:
+        logger.warning(f"Failed to get conversation context from checkpointer: {e}")
+        conversation_context = ""
+    
+    # Helper to normalize message content into plain text
+    def _to_plain_text(content: Any) -> str:
+        try:
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                # LangChain content blocks: take text parts
+                texts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        t = part.get("text")
+                        if isinstance(t, str):
+                            texts.append(t)
+                return "\n".join(texts) if texts else str(content)
+            if isinstance(content, dict):
+                t = content.get("text")
+                if isinstance(t, str):
+                    return t
+                return str(content)
+            return str(content)
+        except Exception:
+            return str(content)
+
+    # Extract latest user input as plain text
+    user_input = ""
+    if state.get("messages"):
+        last_msg = state["messages"][-1]
+        if hasattr(last_msg, 'content') and last_msg.content:
+            user_input = _to_plain_text(last_msg.content)
+    
+    # Minimal in-band fallback for local dev (when headers don't reach backend)
+    inband_user_id = None
+    if "user_id: user_" in user_input:
+        try:
+            inband_user_id = user_input.split("user_id: user_")[1].split()[0]
+            inband_user_id = f"user_{inband_user_id}"
+        except:
+            pass
+    
+    # Extract user information from headers (direct LangGraph connection)
+    user_id = None
+    user_email = None
+    user_metadata = {}
+    try:
+        meta = state.get("metadata", {})
+        cfg = state.get("configurable", {}) or {}
+
+        # Get headers from metadata (API passthrough forwards them here)
+        headers = meta.get("headers", {}) if isinstance(meta.get("headers", {}), dict) else {}
+
+        # Also check for user_id in configurable context (from URL parameters)
+        url_user_id = cfg.get("user_id") if isinstance(cfg.get("user_id"), str) else None
+
+        # Debug logging
+        logger.info(f"🔍 [AUTH DEBUG] Headers from metadata: {list(headers.keys())}")
+        logger.info(f"🔍 [AUTH DEBUG] URL user_id: {url_user_id}")
+        logger.info(f"🔍 [AUTH DEBUG] Full metadata: {meta}")
+        logger.info(f"🔍 [AUTH DEBUG] Full configurable: {cfg}")
+
+        # Minimal: trust headers from meta.headers (set by proxy)
+        all_headers = {}
+        if isinstance(meta.get("headers"), dict):
+            all_headers.update(meta["headers"])
+        
+        # Check if headers are directly in the state (when headers=True is set)
+        if "headers" in state:
+            state_headers = state.get("headers", {})
+            if isinstance(state_headers, dict):
+                all_headers.update(state_headers)
+                logger.info(f"🔍 [AUTH DEBUG] Found headers in state: {list(state_headers.keys())}")
+        
+        # Also check for headers in the state keys
+        for key, value in state.items():
+            if key.lower().startswith("x-") and isinstance(value, str):
+                all_headers[key] = value
+        
+        # Try to extract user_id from request context
+        # Since headers aren't making it through, let's try to get it from the request
+        try:
+            import contextvars
+            # Try to get the current request context
+            request_context = contextvars.copy_context()
+            logger.info(f"🔍 [AUTH DEBUG] Request context: {request_context}")
+            
+            # Try to get user_id from the request context
+            # The API passthrough should be forwarding it as a header
+            for key, value in request_context.items():
+                if 'user' in str(key).lower() or 'auth' in str(key).lower():
+                    logger.info(f"🔍 [AUTH DEBUG] Found context key: {key} = {value}")
+        except Exception as e:
+            logger.debug(f"Could not access request context: {e}")
+
+        # Extract user information from headers (if present), else URL/body/messages
+        header_user_id = (
+            all_headers.get("X-User-ID") or
+            all_headers.get("x-user-id")
+        )
+        # Prefer headers, then message additional_kwargs, then URL/config
+        user_id = header_user_id or message_user_id or url_user_id
+        user_email = None
+        user_authenticated = all_headers.get("X-User-Authenticated") or all_headers.get("x-user-authenticated")
+        
+        # Check for authentication from multiple sources
+        is_authenticated = ((user_authenticated == "true") or bool(user_id))
+        
+        if user_id and is_authenticated:
+            # User is authenticated (either via headers or URL parameter)
+            provider = "header"
+            user_metadata = {
+                "user_id": user_id,
+                "user_email": user_email,
+                "authenticated": True,
+                "provider": provider,
+            }
+
+            # Clean up None values
+            user_metadata = {k: v for k, v in user_metadata.items() if v is not None}
+
+            if header_user_id:
+                logger.info(f"🔍 [AUTH DEBUG] ✅ Using authenticated user from headers: {user_id}")
+            elif url_user_id:
+                logger.info(f"🔍 [AUTH DEBUG] ✅ Using user from URL parameter: {user_id}")
+            else:
+                logger.info(f"🔍 [AUTH DEBUG] ✅ Using authenticated user from body/messages: {user_id}")
+        else:
+            # Fallback to anonymous user
+            user_id = "anonymous-user"
+            user_email = None
+            user_metadata = {
+                "provider": "anonymous",
+                "authenticated": False,
+            }
+
+            # Clean up None values
+            user_metadata = {k: v for k, v in user_metadata.items() if v is not None}
+
+            logger.info(f"🔍 [AUTH DEBUG] ⚠️ No authenticated user found, using anonymous user")
+
+    except Exception as e:
+        logger.error(f"Error resolving user context: {e}", exc_info=True)
+        user_id = "anonymous-user"
+        user_email = None
+        user_metadata = {"provider": "anonymous", "authenticated": False}
+
+    if not user_id or not isinstance(user_id, str) or not user_id.strip():
+        user_id = "anonymous-user"
+        user_metadata["provider"] = "anonymous"
+        user_metadata["authenticated"] = "false"
+    
+    user_id_manager.current_user_id = user_id
+    
+    # Store user metadata globally for mem0 access
+    global global_user_metadata
+    global_user_metadata = user_metadata
+    
+    # Log comprehensive user info
+    user_display = user_email or user_metadata.get("username") or user_id
+    logger.debug(f"👤 [CONTEXT PREP] Using user: {user_display} (ID: {user_id})")
+    logger.debug(f"👤 [CONTEXT PREP] User metadata: {user_metadata}")
+    
+    out_messages = []
+    
+    # Process user input and extract entities
+    if user_input:
+        logger.debug(f"Processing user input: {user_input}")
+        
+        # Extract entities from user input
+        try:
+            entities = await extract_entities(user_input)
+            logger.debug(f"Extracted entities: {entities}")
+            # Keep entity extraction silent
+        except Exception as e:
+            logger.warning(f"Entity extraction failed: {e}")
+        
+        # Search for related memories - this refreshes the context for every conversation
+        if config.MEM0_API_KEY:
+            try:
+                # If user is asking to show memories, use a wildcard query
+                lowered_ui = user_input.lower()
+                wants_all = any(p in lowered_ui for p in ["show all", "show my memories", "all my memories", "list memories", "show memories"]) and "memory" in lowered_ui
+                search_query = "*" if wants_all else user_input
+                
+                # Prepend an assistant tool_call so the following ToolMessage is valid for the LLM
+                _tc_id = f"rc_{uuid4().hex[:24]}"
+                out_messages.append(
+                    AIMessage(
+                        content="",
+                        tool_calls=[{
+                            "name": "recall_tool",
+                            "id": _tc_id,
+                            "args": {"query": search_query, "top_k": 6},
+                        }],
+                    )
+                )
+                # Call recall tool and display the tool result so UI shows a card
+                recall_out = await recall_tool.ainvoke({"query": search_query, "top_k": 6})
+                
+                # Enhance recall output with conversation context if available
+                enhanced_recall = recall_out
+                if conversation_context and not wants_all:
+                    enhanced_recall = f"{recall_out}\n\n{conversation_context}"
+                    logger.info(f"🔄 [HYBRID] Enhanced recall with conversation context")
+                
+                out_messages.append(
+                    ToolMessage(
+                        content=enhanced_recall,
+                        name="recall_tool",
+                        tool_call_id=_tc_id,
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"Memory recall emit failed: {e}")
+
+        
+        # Only list memories if user has many (indicates need for management)
+        try:
+            all_memories = await list_memories()
+            if all_memories and all_memories != "No memories found":
+                memory_count = len(all_memories.split('\n')) if '\n' in all_memories else 1
+                # Only show if user has more than 5 memories (needs management)
+                if memory_count > 5:
+                    out_messages.append(SystemMessage(content=f"📋 User has {memory_count} memories - consider using memory management tools"))
+            else:
+                out_messages.append(SystemMessage(content=f"📋 User has no memories yet"))
+        except Exception as e:
+            logger.warning(f"Memory listing failed: {e}")
+        
+        # Only traverse memory graph if there are related memories
+        try:
+            _ = await traverse_memory_graph(user_input, depth=3)
+            # Do not emit a message; keep traversal silent in UI
+            # Don't show message if no connections found (not needed)
+        except Exception as e:
+            logger.warning(f"Memory graph traversal failed: {e}")
+        
+        # Opportunistic prune of older/low-importance memories
+        try:
+            _ = await prune_memories(max_age_days=180)
+            # prune_memories returns JSON; include only when deletions happened
+            # Keep pruning silent in UI
+        except Exception as e:
+            logger.warning(f"Memory pruning failed: {e}")
+        
+        # Automatic maintenance: promote/pin frequently accessed, unpin stale pinned
+        try:
+            _ = await auto_maintain_memories(user_input)
+        except Exception as e:
+            logger.warning(f"Auto-maintenance failed: {e}")
+        
+        # Only check pinned memories if user has many memories
+        try:
+            all_memories = await list_memories()
+            # Keep pinned memory counts silent in UI
+        except Exception as e:
+            logger.warning(f"Pinned memory check failed: {e}")
+        
+    if out_messages:
+        return {"context_prepared": True, "messages": out_messages}
+    return {"context_prepared": True}
 
 def should_continue(state: AgentState) -> str:
     """Determine if the agent should continue or end."""
@@ -1848,6 +2187,808 @@ def should_continue(state: AgentState) -> str:
     logger.info("No tool calls or human input needed - ending conversation")
     return "end"
 
+
+
+@tool
+async def remember_tool(memory_content: str, context: str = "") -> str:
+    """
+    Store a natural language memory using mem0's full associative power.
+    
+    Args:
+        memory_content: Natural language description of what to remember
+        context: Additional context about when/why this was remembered
+    """
+    # Skip mem0 for guest users - they should rely on conversational history
+    current_user = get_current_user_id()
+    if current_user == "anonymous-user":
+        logger.info(f"[MEMORY] Skipping mem0 storage for guest user: {memory_content[:50]}...")
+        return f"Memory noted for this conversation: {memory_content} (guest user - not stored permanently)"
+    
+    # Create enhanced memory with context
+    enhanced_content = memory_content
+    if context:
+        enhanced_content = f"{memory_content} | Context: {context}"
+    
+    # Store in mem0 cloud
+    if not config.MEM0_API_KEY:
+        logger.info("MEM0_API_KEY not configured")
+        return f"Memory not stored: {memory_content} (mem0 not configured)"
+    
+    try:
+        logger.info(f"Storing memory in mem0: {memory_content[:50]}...")
+
+        # Proactively delete older conflicting memories without relying on explicit markers.
+        # Use a lightweight contradiction check via the LLM; fallback to simple heuristics if it fails.
+        deletion_note = ""
+        try:
+            import asyncio as _asyncio
+            from mem0 import MemoryClient
+
+            async def _is_contradictory(new_text: str, old_text: str) -> bool:
+                try:
+                    # Use a small model to judge contradiction about preference truth value
+                    from langchain_openai import ChatOpenAI
+                    def _check() -> bool:
+                        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+                        prompt = (
+                            "You compare two short statements about a user's preference.\n"
+                            "If they contradict (one says they like/prefer/enjoy and the other says they don't/stop/dislike),"
+                            " answer 'yes'. Otherwise answer 'no'.\n"
+                            f"A: {new_text}\nB: {old_text}\nAnswer yes or no only:"
+                        )
+                        out = llm.invoke(prompt).content.strip().lower()
+                        return out.startswith("y")
+                    return await _asyncio.to_thread(_check)
+                except Exception:
+                    # Fallback minimal heuristic
+                    t = (new_text + " " + old_text).lower()
+                    return (" like " in new_text.lower() and "don't" in old_text.lower()) or (" don't " in new_text.lower() and " like " in old_text.lower())
+
+            def _search_existing_sync() -> list[dict]:
+                c = MemoryClient(api_key=config.MEM0_API_KEY)
+                return c.search(memory_content, version="v2", filters={"user_id": get_current_user_id()}) or []
+
+            existing = await _asyncio.to_thread(_search_existing_sync)
+            conflicting_ids: list[str] = []
+            for r in existing[:10]:
+                old_txt = r.get("memory") or ""
+                if not old_txt:
+                    continue
+                try:
+                    if await _is_contradictory(memory_content, old_txt):
+                        rid = r.get("id")
+                        if rid:
+                            conflicting_ids.append(rid)
+                except Exception:
+                    continue
+
+            if conflicting_ids:
+                def _delete() -> None:
+                    c = MemoryClient(api_key=config.MEM0_API_KEY)
+                    c.batch_delete([{"memory_id": i} for i in conflicting_ids])
+                await _asyncio.to_thread(_delete)
+                deletion_note = f" (removed {len(conflicting_ids)} conflicting)"
+        except Exception:
+            # Best-effort only; never block on this
+            pass
+
+        # Define custom categories using the shape expected by mem0 (name + description)
+
+        custom_categories_definitions = [
+            {"name": "airline_entities", "description": "Airlines, frequent flyer programs, airline experiences, and airline preferences."},
+            {"name": "destination_entities", "description": "Cities, countries, regions, landmarks, and travel destinations."},
+            {"name": "travel_preferences", "description": "Seat preferences, cabin class, budget, travel frequency, and style preferences."},
+            {"name": "seasonal_patterns", "description": "Seasonal travel preferences, weather preferences, and time-based patterns."},
+            {"name": "accommodation_entities", "description": "Hotels, room types, amenities, and accommodation experiences."},
+            {"name": "travel_context", "description": "Living in a place vs visiting, business vs leisure, solo vs group travel."},
+            {"name": "loyalty_relationships", "description": "Loyalty program memberships, points, miles, and reward preferences."},
+            {"name": "travel_history", "description": "Past trips, experiences, and travel memories that inform future decisions."},
+            {"name": "preference_inferences", "description": "Inferred preferences based on behavior, choices, and expressed likes/dislikes."},
+            {"name": "semantic_connections", "description": "Associative connections between entities, preferences, and contexts."},
+        ]
+        
+
+        # Ensure project is on API version v2 (best-effort, no-op if already set)
+        try:
+            from mem0 import MemoryClient as _SyncClient
+            _ver_client = _SyncClient(api_key=config.MEM0_API_KEY)
+            try:
+                _ver_client.project.update(version="v2")
+            except Exception:
+                try:
+                    _ver_client.update_project(version="v2")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Compute an importance score and TTL policy
+        def _score_importance(text: str) -> tuple[str, float, int]:
+            t = text.lower()
+            # Heuristics: loyalty/preferences higher, transient context lower
+            high_markers = ["loyalty", "frequent flyer", "always", "never", "prefers", "preference"]
+            med_markers = ["hotel", "flight", "window seat", "aisle seat", "economy", "business", "direct flight"]
+            if any(m in t for m in high_markers):
+                return ("high", 0.9, 365)
+            if any(m in t for m in med_markers):
+                return ("medium", 0.6, 120)
+            return ("low", 0.3, 30)
+
+        importance, importance_score, ttl_days = _score_importance(enhanced_content)
+
+        # Deduplicate: if an identical memory exists, increment counters and return
+        try:
+            ac = AsyncMemoryClient(api_key=config.MEM0_API_KEY)
+            existing = await ac.search(
+                memory_content,
+                version="v2",
+                filters={"user_id": get_current_user_id()},
+            )
+            if existing:
+                # Simple exact-match check (normalized)
+                norm_new = memory_content.strip().lower().rstrip(". ")
+                for m in existing[:5]:
+                    if (m.get("memory") or "").strip().lower().rstrip(". ") == norm_new:
+                        try:
+                            from mem0 import MemoryClient
+                            def _bump():
+                                c = MemoryClient(api_key=config.MEM0_API_KEY)
+                                md = m.get("metadata") or {}
+                                acc = int(md.get("access_count", 0)) + 1
+                                md.update({
+                                    "access_count": acc,
+                                    "last_accessed": datetime.utcnow().isoformat() + "Z",
+                                })
+                                c.update(m.get("id"), metadata=md)
+                            await asyncio.to_thread(_bump)
+                        except Exception:
+                            pass
+                        return f"Remembered (updated existing): {memory_content}"
+        except Exception:
+            pass
+
+        # Add the memory and pass explicit categories to ensure assignment
+        try:
+            client = AsyncMemoryClient(api_key=config.MEM0_API_KEY)
+            
+            # Enhanced metadata with user context
+            enhanced_metadata = {
+                "importance": importance,
+                "importance_score": importance_score,
+                "ttl_days": ttl_days,
+                "user_id": get_current_user_id(),
+                "timestamp": datetime.now().isoformat(),
+                "session_type": "authenticated" if user_id_manager.current_user_id not in ["guest", "anonymous", "anonymous-user"] else "guest",
+            }
+            
+            # Add user metadata if available (from context_preparation_node)
+            try:
+                global global_user_metadata
+                if global_user_metadata:
+                    # Add user name and profile info to metadata
+                    if global_user_metadata.get("first_name"):
+                        enhanced_metadata["user_first_name"] = global_user_metadata["first_name"]
+                    if global_user_metadata.get("last_name"):
+                        enhanced_metadata["user_last_name"] = global_user_metadata["last_name"]
+                    if global_user_metadata.get("username"):
+                        enhanced_metadata["user_username"] = global_user_metadata["username"]
+                    if global_user_metadata.get("user_email"):
+                        enhanced_metadata["user_email"] = global_user_metadata["user_email"]
+                    if global_user_metadata.get("provider"):
+                        enhanced_metadata["user_provider"] = global_user_metadata["provider"]
+                    
+                    # Create a user display name for better memory context
+                    user_name = ""
+                    if global_user_metadata.get("first_name") and global_user_metadata.get("last_name"):
+                        user_name = f"{global_user_metadata['first_name']} {global_user_metadata['last_name']}"
+                    elif global_user_metadata.get("first_name"):
+                        user_name = global_user_metadata["first_name"]
+                    elif global_user_metadata.get("username"):
+                        user_name = global_user_metadata["username"]
+                    
+                    if user_name:
+                        enhanced_metadata["user_name"] = user_name
+                        logger.info(f"📝 [MEMORY] Storing memory for user: {user_name}")
+            except Exception as e:
+                logger.warning(f"Failed to add user metadata to memory: {e}")
+            
+            result = await client.add(
+                [
+                    {"role": "user", "content": memory_content},
+                    {"role": "assistant", "content": enhanced_content},
+                ],
+                user_id=get_current_user_id(),
+                custom_categories=custom_categories_definitions,
+                metadata=enhanced_metadata,
+                output_format="v1.1",
+            )
+        except Exception as async_err:
+            logger.warning(
+                "Async mem0 add failed (will fallback to sync in thread): %s",
+                str(async_err),
+            )
+            from mem0 import MemoryClient
+
+            def _sync_add() -> Any:
+                sync_client = MemoryClient(api_key=config.MEM0_API_KEY)
+                
+                # Enhanced metadata with user context
+                enhanced_metadata = {
+                    "importance": importance,
+                    "importance_score": importance_score,
+                    "ttl_days": ttl_days,
+                    "user_id": get_current_user_id(),
+                    "timestamp": datetime.now().isoformat(),
+                    "session_type": "authenticated" if user_id_manager.current_user_id not in ["guest", "anonymous", "anonymous-user"] else "guest",
+                }
+                
+                # Add user metadata if available (from context_preparation_node)
+                try:
+                    global global_user_metadata
+                    if global_user_metadata:
+                        # Add user name and profile info to metadata
+                        if global_user_metadata.get("first_name"):
+                            enhanced_metadata["user_first_name"] = global_user_metadata["first_name"]
+                        if global_user_metadata.get("last_name"):
+                            enhanced_metadata["user_last_name"] = global_user_metadata["last_name"]
+                        if global_user_metadata.get("username"):
+                            enhanced_metadata["user_username"] = global_user_metadata["username"]
+                        if global_user_metadata.get("user_email"):
+                            enhanced_metadata["user_email"] = global_user_metadata["user_email"]
+                        if global_user_metadata.get("provider"):
+                            enhanced_metadata["user_provider"] = global_user_metadata["provider"]
+                        
+                        # Create a user display name for better memory context
+                        user_name = ""
+                        if global_user_metadata.get("first_name") and global_user_metadata.get("last_name"):
+                            user_name = f"{global_user_metadata['first_name']} {global_user_metadata['last_name']}"
+                        elif global_user_metadata.get("first_name"):
+                            user_name = global_user_metadata["first_name"]
+                        elif global_user_metadata.get("username"):
+                            user_name = global_user_metadata["username"]
+                        
+                        if user_name:
+                            enhanced_metadata["user_name"] = user_name
+                except Exception as e:
+                    logger.warning(f"Failed to add user metadata to memory (sync): {e}")
+                
+                return sync_client.add(
+                    [
+                        {"role": "user", "content": memory_content},
+                        {"role": "assistant", "content": enhanced_content},
+                    ],
+                    user_id=get_current_user_id(),
+                    custom_categories=custom_categories_definitions,
+                    metadata=enhanced_metadata,
+                    output_format="v1.1",
+                )
+
+            result = await asyncio.to_thread(_sync_add)
+
+        logger.info("Successfully stored memory in mem0")
+        return f"Remembered: {memory_content}{deletion_note}"
+
+    except asyncio.TimeoutError:
+        logger.error("mem0 timeout")
+        return f"Memory not stored: mem0 timeout"
+    except Exception as e:
+        logger.error(f"mem0 failed: {e}")
+        return f"Memory not stored: {str(e)[:50]}"
+
+ 
+
+        
+
+@tool
+async def recall_tool(query: str, top_k: int = 6) -> str:
+    """
+    Simple memory recall with debug logging.
+    """
+    # Skip mem0 for guest users - they should rely on conversational history
+    try:
+        current_user = get_current_user_id()
+        logger.debug(f"[RECALL DEBUG] Current user ID from get_current_user_id(): '{current_user}'")
+    except ValueError:
+        logger.debug(f"[RECALL DEBUG] No user ID set, skipping mem0 search for: '{query}'")
+        return "No persistent memories available - user not authenticated."
+    
+    if current_user in ["anonymous-user", "anonymous", "guest"] or not current_user or not current_user.startswith("user_"):
+        logger.debug(f"[RECALL DEBUG] Skipping mem0 search for guest/anonymous user: '{query}' (user_id: {current_user})")
+        return "No persistent memories available for guest users."
+    
+    if not config.MEM0_API_KEY:
+        return "No memories available: mem0 not configured"
+
+    try:
+        logger.info(f"[RECALL DEBUG] Searching for: '{query}' in namespace: '{get_current_user_id()}'")
+        
+        # Use sync client in thread to avoid blocking calls
+        from mem0 import MemoryClient
+        
+        # Try different search approaches
+        search_results = []
+        
+        # 1. Simple search without version
+        try:
+            logger.debug(f"[RECALL DEBUG] Trying simple search for: '{query}'")
+            def _sync_search_simple():
+                client = MemoryClient(api_key=config.MEM0_API_KEY)
+                return client.search(query, filters={"user_id": get_current_user_id()})
+            simple_results = await asyncio.to_thread(_sync_search_simple)
+            logger.debug(f"[RECALL DEBUG] Simple search returned {len(simple_results or [])} results")
+            if simple_results:
+                search_results.extend(simple_results)
+        except Exception as e:
+            logger.warning(f"[RECALL DEBUG] Simple search failed: {e}")
+        
+        # 2. Search with v2 version
+        try:
+            logger.debug(f"[RECALL DEBUG] Trying v2 search for: '{query}'")
+            def _sync_search_v2():
+                client = MemoryClient(api_key=config.MEM0_API_KEY)
+                return client.search(query, version="v2", filters={"user_id": get_current_user_id()})
+            v2_results = await asyncio.to_thread(_sync_search_v2)
+            logger.debug(f"[RECALL DEBUG] V2 search returned {len(v2_results or [])} results")
+            if v2_results:
+                search_results.extend(v2_results)
+        except Exception as e:
+            logger.warning(f"[RECALL DEBUG] V2 search failed: {e}")
+        
+        # 3. Search without filters (all memories)
+        try:
+            logger.debug(f"[RECALL DEBUG] Trying search without filters for: '{query}'")
+            def _sync_search_no_filter():
+                client = MemoryClient(api_key=config.MEM0_API_KEY)
+                return client.search(query)
+            no_filter_results = await asyncio.to_thread(_sync_search_no_filter)
+            logger.debug(f"[RECALL DEBUG] No-filter search returned {len(no_filter_results or [])} results")
+            if no_filter_results:
+                search_results.extend(no_filter_results)
+        except Exception as e:
+            logger.warning(f"[RECALL DEBUG] No-filter search failed: {e}")
+        
+        # 4. List all memories to see what's available
+        try:
+            logger.debug(f"[RECALL DEBUG] Listing all memories in namespace: '{get_current_user_id()}'")
+            def _sync_list_all():
+                client = MemoryClient(api_key=config.MEM0_API_KEY)
+                return client.search("*", filters={"user_id": get_current_user_id()})
+            all_memories = await asyncio.to_thread(_sync_list_all)
+            logger.debug(f"[RECALL DEBUG] Total memories in namespace: {len(all_memories or [])}")
+            if all_memories:
+                logger.debug(f"[RECALL DEBUG] Sample memories: {[m.get('memory', '')[:50] for m in all_memories[:3]]}")
+        except Exception as e:
+            logger.warning(f"[RECALL DEBUG] List all failed: {e}")
+        
+        # Deduplicate results
+        unique_memories = {}
+        for memory in search_results:
+            memory_id = memory.get('id')
+            if memory_id and memory_id not in unique_memories:
+                unique_memories[memory_id] = memory
+        
+        memories = list(unique_memories.values())
+        logger.info(f"[RECALL DEBUG] Final deduplicated results: {len(memories)}")
+        
+        if memories:
+            # Extract memory content
+            memory_texts = []
+            for memory in memories[:top_k]:
+                content = memory.get('memory', '')
+                if content:
+                    memory_texts.append(content)
+            
+            if memory_texts:
+                return "Related memories: " + "; ".join(memory_texts)
+        
+        return f"No memories found related to: {query}"
+
+    except Exception as e:
+        logger.error(f"[RECALL DEBUG] Recall failed: {e}")
+        return f"No memories found related to your request. Error: {str(e)[:100]}"
+
+
+
+async def extract_entities(text: str) -> str:
+    """
+    Extract travel-related entities from text for associative memory.
+    
+    Identifies cities, airlines, preferences, and other travel entities
+    to enable knowledge graph traversal and semantic connections.
+    
+    Args:
+        text: Text to extract entities from
+        
+    Returns:
+        JSON string with extracted entities and their categories
+    """
+    try:
+        # Define travel entities to look for
+        travel_entities = {
+            'cities': ['paris', 'london', 'new york', 'tokyo', 'sydney', 'melbourne', 'brisbane', 'perth', 'singapore', 'dubai'],
+            'airlines': ['american airlines', 'delta', 'united', 'qantas', 'virgin', 'jetstar', 'emirates', 'singapore airlines'],
+            'preferences': ['window seat', 'aisle seat', 'economy', 'business', 'first class', 'morning flight', 'direct flight'],
+            'seasons': ['spring', 'summer', 'autumn', 'winter', 'fall'],
+            'accommodations': ['hotel', 'gym', 'city center', 'downtown', 'airport hotel'],
+            'activities': ['business', 'leisure', 'vacation', 'sightseeing']
+        }
+        
+        text_lower = text.lower()
+        found_entities = {}
+        
+        # Extract entities by category
+        for category, items in travel_entities.items():
+            found = []
+            for item in items:
+                if item in text_lower:
+                    found.append(item)
+            if found:
+                found_entities[category] = found
+        
+        # Also find capitalized words that might be entities
+        import re
+        capitalized_words = re.findall(r'\b[A-Z][a-z]+\b', text)
+        if capitalized_words:
+            found_entities['potential_entities'] = capitalized_words
+        
+        return json.dumps({
+            'entities': found_entities,
+            'text': text,
+            'message': f'Extracted {sum(len(v) for v in found_entities.values())} entities from text'
+        })
+    except Exception as e:
+        logger.error(f"Error extracting entities: {e}")
+        return json.dumps({
+            'error': f'Error extracting entities: {str(e)}',
+            'text': text
+        })
+
+async def traverse_memory_graph(start_entity: str, depth: int = 2) -> str:
+    """
+    Traverse the memory graph starting from a specific entity.
+
+    What it does:
+    - Finds direct memories related to `start_entity` (e.g., "Paris").
+    - Extracts related terms from those memories.
+    - If `depth > 1`, searches those related terms to surface indirect associations.
+
+    When to use:
+    - After calling `recall_tool` if results are thin or ambiguous, and you need connected context.
+    - When the user mentions a strong anchor entity (city/airline) and richer associations could improve recommendations.
+
+    Guidance:
+    - Prefer `depth=1` for speed; use `depth=2` only when the query is complex and the extra context is valuable.
+    - Do not dump raw memories verbatim to the user. Use the associations to personalize and justify suggestions naturally.
+
+    Args:
+        start_entity: The entity to start traversal from (e.g., "Paris", "American Airlines").
+        depth: How many levels deep to traverse (default: 2).
+
+    Returns:
+        JSON string with traversal results and discovered relationships.
+    """
+    try:
+        logger.info(f"Traversing memory graph from '{start_entity}' with depth {depth}")
+        
+        # Use sync client in a background thread for traversal searches to avoid event-loop blocking
+        from mem0 import MemoryClient
+        def _sync_search_start() -> Any:
+            sync_client = MemoryClient(api_key=config.MEM0_API_KEY)
+            return sync_client.search(
+                start_entity,
+                version="v2",
+                filters={"user_id": get_current_user_id()},
+            )
+        direct_memories = await asyncio.to_thread(_sync_search_start)
+        direct_memories = direct_memories or []
+        
+        # Extract related terms from direct memories
+        related_terms = []
+        for memory in direct_memories:
+            content = memory.get('memory', '').lower()
+            # Find other entities mentioned in these memories
+            for term in content.split():
+                if len(term) > 3 and term not in [start_entity.lower(), 'user', 'prefers', 'likes', 'travel']:
+                    related_terms.append(term)
+        
+        # If depth > 1, search for memories related to the related terms
+        indirect_memories = []
+        if depth > 1 and related_terms:
+            # Take top related terms and search for them
+            top_terms = list(set(related_terms))[:3]  # Limit to 3 terms
+            for term in top_terms:
+                try:
+                    def _sync_search_term() -> Any:
+                        sc = MemoryClient(api_key=config.MEM0_API_KEY)
+                        return sc.search(
+                            term,
+                            version="v2",
+                            filters={"user_id": get_current_user_id()},
+                        )
+                    term_memories = await asyncio.to_thread(_sync_search_term)
+                    if term_memories:
+                        indirect_memories.extend(term_memories)
+                except Exception as e2:
+                    logger.warning(f"Traversal term search failed for '{term}': {e2}")
+                    continue
+        
+        # Format results
+        traversal_result = {
+            'start_entity': start_entity,
+            'depth': depth,
+            'direct_memories': [m.get('memory', '') for m in direct_memories],
+            'related_terms': list(set(related_terms)),
+            'indirect_memories': [m.get('memory', '') for m in indirect_memories],
+            'total_memories_found': len(direct_memories) + len(indirect_memories),
+            'message': f'Traversed memory graph from "{start_entity}" - found {len(direct_memories)} direct and {len(indirect_memories)} indirect memories'
+        }
+        
+        return json.dumps(traversal_result, indent=2)
+                
+    except Exception as e:
+        logger.error(f"Error traversing memory graph: {e}")
+        return json.dumps({
+            'error': f'Error traversing memory graph: {str(e)}',
+            'start_entity': start_entity
+        })
+
+async def pin_memory(memory_id: str) -> str:
+    """Pin a memory (prevent expiry) by setting metadata.pinned=true."""
+    if not config.MEM0_API_KEY:
+        return "Cannot pin: mem0 not configured"
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _pin() -> dict:
+            c = MemoryClient(api_key=config.MEM0_API_KEY)
+            return c.update(memory_id, metadata={"pinned": True})
+        res = await _asyncio.to_thread(_pin)
+        return json.dumps({"status": "pinned", "id": memory_id, "response": res})
+    except Exception as e:
+        return json.dumps({"error": f"Pin failed: {str(e)[:200]}", "id": memory_id})
+
+async def unpin_memory(memory_id: str) -> str:
+    """Unpin a memory by setting metadata.pinned=false."""
+    if not config.MEM0_API_KEY:
+        return "Cannot unpin: mem0 not configured"
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _unpin() -> dict:
+            c = MemoryClient(api_key=config.MEM0_API_KEY)
+            return c.update(memory_id, metadata={"pinned": False})
+        res = await _asyncio.to_thread(_unpin)
+        return json.dumps({"status": "unpinned", "id": memory_id, "response": res})
+    except Exception as e:
+        return json.dumps({"error": f"Unpin failed: {str(e)[:200]}", "id": memory_id})
+
+async def update_memory_importance(memory_id: str, importance: str = "medium", importance_score: float = 0.6, ttl_days: int = 120) -> str:
+    """Update a memory's importance and TTL metadata."""
+    if not config.MEM0_API_KEY:
+        return "Cannot update: mem0 not configured"
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _upd() -> dict:
+            c = MemoryClient(api_key=config.MEM0_API_KEY)
+            md = {
+                "importance": importance,
+                "importance_score": float(importance_score),
+                "ttl_days": int(ttl_days),
+            }
+            return c.update(memory_id, metadata=md)
+        res = await _asyncio.to_thread(_upd)
+        return json.dumps({"status": "updated", "id": memory_id, "response": res})
+    except Exception as e:
+        return json.dumps({"error": f"Update importance failed: {str(e)[:200]}", "id": memory_id})
+
+async def prune_memories(max_age_days: int = 180, min_importance: str = "low") -> str:
+    """Prune memories older than max_age_days and with importance below threshold (low < medium < high)."""
+    if not config.MEM0_API_KEY:
+        return "Cannot prune: mem0 not configured"
+    order = {"low": 0, "medium": 1, "high": 2}
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        from datetime import datetime, timezone
+        def _prune() -> dict:
+            c = MemoryClient(api_key=config.MEM0_API_KEY)
+            results = c.search("*", version="v2", filters={"user_id": get_current_user_id()}) or []
+            cutoff = datetime.now(timezone.utc).timestamp() - (max_age_days * 86400)
+            to_delete = []
+            for m in results:
+                md = m.get("metadata") or {}
+                imp = md.get("importance", "low").lower()
+                if order.get(imp, 0) < order.get(min_importance, 0):
+                    continue
+                # Use created_at timestamp
+                created = m.get("created_at")
+                try:
+                    ts = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp() if created else None
+                except Exception:
+                    ts = None
+                if ts is not None and ts < cutoff:
+                    to_delete.append(m.get("id"))
+            if to_delete:
+                c.batch_delete([i for i in to_delete if i])
+            return {"deleted": len(to_delete), "ids": to_delete[:50]}
+        res = await _asyncio.to_thread(_prune)
+        return json.dumps(res)
+    except Exception as e:
+        return json.dumps({"error": f"Prune failed: {str(e)[:200]}"})
+
+async def auto_maintain_memories(user_query: str, max_updates: int = 5) -> str:
+    """Automatically adjust memory metadata (importance/pin) based on usage signals.
+
+    Heuristics:
+    - For memories matching the current query: bump access_count and last_accessed.
+    - If access_count >= 3 and importance is low → set medium.
+    - If access_count >= 5 or importance is high → pin.
+    - If pinned and last_accessed is older than 120 days → unpin.
+    """
+    if not config.MEM0_API_KEY:
+        return "No-op: mem0 not configured"
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        from datetime import datetime, timezone
+
+        def _fetch_and_update() -> dict:
+            client = MemoryClient(api_key=config.MEM0_API_KEY)
+            now_iso = datetime.now(tz=timezone.utc).isoformat()
+            updated = {"promoted": 0, "pinned": 0, "unpinned": 0, "touched": 0}
+
+            # 1) Touch relevant memories for this query
+            results = client.search(user_query, version="v2", filters={"user_id": get_current_user_id()}) or []
+            for m in results[:max_updates]:
+                mid = m.get("id")
+                md = (m.get("metadata") or {}).copy()
+                acc = int(md.get("access_count", 0)) + 1
+                md.update({
+                    "access_count": acc,
+                    "last_accessed": now_iso,
+                })
+                # Promote importance with use
+                importance = str(md.get("importance", "low")).lower()
+                if acc >= 3 and importance == "low":
+                    md["importance"] = "medium"
+                    md["importance_score"] = float(max(0.6, float(md.get("importance_score", 0.6))))
+                    md["ttl_days"] = int(max(120, int(md.get("ttl_days", 120))))
+                    updated["promoted"] += 1
+                if acc >= 5 or str(md.get("importance", "")).lower() == "high":
+                    md["pinned"] = True
+                    updated["pinned"] += 1
+                client.update(mid, metadata=md)
+                updated["touched"] += 1
+
+            # 2) Unpin long-stale pinned memories
+            all_res = client.search("*", version="v2", filters={"user_id": get_current_user_id()}) or []
+            for m in all_res[: 100]:  # limit scan size
+                md = m.get("metadata") or {}
+                if not md.get("pinned"):
+                    continue
+                last = md.get("last_accessed")
+                try:
+                    if last:
+                        # If older than ~120 days, unpin
+                        dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                        age_days = (datetime.now(tz=timezone.utc) - dt).days
+                        if age_days >= 120:
+                            client.update(m.get("id"), metadata={"pinned": False})
+                            updated["unpinned"] += 1
+                except Exception:
+                    continue
+
+            return updated
+
+        stats = await _asyncio.to_thread(_fetch_and_update)
+        return json.dumps(stats)
+    except Exception as e:
+        return json.dumps({"error": f"Auto-maintain failed: {str(e)[:200]}"})
+async def delete_memory(memory_id: str) -> str:
+    """Delete a single memory by its ID in mem0."""
+    if not config.MEM0_API_KEY:
+        return "Cannot delete: mem0 not configured"
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _do_delete() -> dict:
+            client = MemoryClient(api_key=config.MEM0_API_KEY)
+            return client.delete(memory_id)
+        resp = await _asyncio.to_thread(_do_delete)
+        return json.dumps({"status": "deleted", "id": memory_id, "response": resp})
+    except Exception as e:
+        return json.dumps({"error": f"Delete failed: {str(e)[:200]}", "id": memory_id})
+
+async def delete_memories_by_query(query: str, top_k: int = 10) -> str:
+    """Search for memories matching `query` (scoped to this namespace) and delete up to `top_k` results."""
+    if not config.MEM0_API_KEY:
+        return "Cannot delete: mem0 not configured"
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _do_search_and_delete() -> dict:
+            client = MemoryClient(api_key=config.MEM0_API_KEY)
+            results = client.search(query, version="v2", filters={"user_id": get_current_user_id()}) or []
+            ids = [r.get("id") for r in results[: max(1, min(int(top_k), 100))] if r.get("id")]
+            if not ids:
+                return {"deleted": 0, "ids": []}
+            resp = client.batch_delete([{"memory_id": i} for i in ids])
+            return {"deleted": len(ids), "ids": ids, "response": resp}
+        data = await _asyncio.to_thread(_do_search_and_delete)
+        return json.dumps(data)
+    except Exception as e:
+        return json.dumps({"error": f"Batch delete failed: {str(e)[:200]}"})
+
+async def delete_all_namespace_memories(confirm: bool = False) -> str:
+    """Delete ALL memories for the current namespace (irreversible). Pass confirm=True to proceed."""
+    if not config.MEM0_API_KEY:
+        return "Cannot delete: mem0 not configured"
+    if not confirm:
+        return "Refused: set confirm=True to delete all memories for this namespace"
+    try:
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _wipe() -> dict:
+            client = MemoryClient(api_key=config.MEM0_API_KEY)
+            total = 0
+            while True:
+                results = client.search("*", version="v2", filters={"user_id": get_current_user_id()}) or []
+                ids = [r.get("id") for r in results[:100] if r.get("id")]
+                if not ids:
+                    break
+                client.batch_delete([{"memory_id": i} for i in ids])
+                total += len(ids)
+                if len(ids) < 100:
+                    break
+            return {"deleted_total": total}
+        res = await _asyncio.to_thread(_wipe)
+        return json.dumps(res)
+    except Exception as e:
+        return json.dumps({"error": f"Namespace wipe failed: {str(e)[:200]}"})
+
+async def list_memories() -> str:
+    """List all memories stored in mem0."""
+    if not config.MEM0_API_KEY:
+        return "No memories available: mem0 not configured"
+    
+    try:
+        logger.info("Listing all memories from mem0 (sync in thread)")
+        from mem0 import MemoryClient
+        import asyncio as _asyncio
+        def _sync_list() -> Any:
+            try:
+                c = MemoryClient(api_key=config.MEM0_API_KEY)
+                return c.search("*", version="v2", filters={"user_id": get_current_user_id()}) or []
+            except Exception:
+                return []
+        memories = await _asyncio.to_thread(_sync_list)
+        if memories:
+            memory_list = []
+            for i, memory in enumerate(memories[:10], 1):
+                content = memory.get('memory', 'No content found')
+                # Sanitize any runtime guard noise
+                if isinstance(content, str) and 'Blocking call to socket' in content:
+                    continue
+                md = memory.get('metadata') or {}
+                imp = md.get('importance')
+                ttl = md.get('ttl_days')
+                pin = md.get('pinned')
+                suffix = []
+                if imp:
+                    suffix.append(f"importance={imp}")
+                if ttl:
+                    suffix.append(f"ttl_days={ttl}")
+                if pin:
+                    suffix.append("pinned")
+                extra = f" ({', '.join(suffix)})" if suffix else ""
+                memory_list.append(f"{i}. {content}{extra}")
+            return f"Found {len(memories)} memories:\n" + "\n".join(memory_list)
+        else:
+            return "No memories found"
+    except Exception as e:
+        logger.error(f"Failed to list memories: {e}")
+        return f"Error listing memories: {str(e)[:50]}"
 
 # Create the graph
 def create_graph():
@@ -1880,8 +3021,10 @@ def create_graph():
             fetch_extra_baggage_options_tool,
             get_available_services_tool,
             fetch_accommodation_reviews_tool,
-            extend_hotel_stay_tool
-        ]
+        remember_tool,
+        recall_tool,
+        extend_hotel_stay_tool
+    ]
         logger.debug(f"Initializing ToolNode with {len(tools)} tools: {[tool.name for tool in tools]}")
         tool_node = ToolNode(tools)
 
@@ -1891,14 +3034,16 @@ def create_graph():
 
         # Add nodes
         logger.debug("Adding nodes to workflow")
+        workflow.add_node("context_preparation", context_preparation_node)
         workflow.add_node("agent", agent_node)
         workflow.add_node("tools", tool_node)
         workflow.add_node("human_input", human_input_node)
-        logger.info("Added 3 nodes: agent, tools, human_input")
+        logger.info("Added 4 nodes: context_preparation, agent, tools, human_input")
 
         # Set the entry point
-        logger.debug("Setting entry point from START to agent")
-        workflow.add_edge(START, "agent")
+        logger.debug("Setting entry point from START to context_preparation")
+        workflow.add_edge(START, "context_preparation")
+        workflow.add_edge("context_preparation", "agent")
 
         # Add conditional edges
         logger.debug("Adding conditional edges from agent node")
@@ -1916,14 +3061,22 @@ def create_graph():
         logger.debug("Adding edge from tools back to agent")
         workflow.add_edge("tools", "agent")
 
-        # After human input, go back to agent
-        logger.debug("Adding edge from human_input back to agent")
-        workflow.add_edge("human_input", "agent")
+        # After human input, go back to context_preparation (to prepare context for new input)
+        logger.debug("Adding edge from human_input back to context_preparation")
+        workflow.add_edge("human_input", "context_preparation")
 
-        # Compile the graph without custom checkpointer (LangGraph API handles persistence)
-        logger.info("Compiling workflow graph")
-        compiled_graph = workflow.compile()
-        logger.info("LangGraph workflow created and compiled successfully")
+        # Compile the graph with proper header handling
+        logger.info("Compiling workflow graph with header injection enabled")
+        
+        # Configure the graph to properly handle headers
+        compiled_graph = workflow.compile(
+            # Enable debug mode to ensure headers are properly handled
+            debug=True,
+            # Use built-in persistence
+            checkpointer=None
+        )
+        
+        logger.info("LangGraph workflow created and compiled successfully with header injection")
 
         return compiled_graph
 
@@ -1936,3 +3089,20 @@ def create_graph():
 logger.info("Initializing BookedAI agent graph...")
 graph = create_graph() 
 logger.info("BookedAI agent graph successfully initialized and ready for use")
+
+# Global user metadata storage
+global_user_metadata = {}
+
+def set_user_metadata(user_id: str, user_email: str):
+    """Set global user metadata for thread creation."""
+    global global_user_metadata
+    global_user_metadata = {
+        "user_id": user_id,
+        "user_email": user_email
+    }
+    logger.info(f"[USER METADATA] Set global user metadata: {global_user_metadata}")
+
+def get_user_metadata():
+    """Get global user metadata."""
+    global global_user_metadata
+    return global_user_metadata.copy()
