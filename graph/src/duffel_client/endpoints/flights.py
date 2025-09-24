@@ -1,9 +1,18 @@
 from typing import List, Dict, Any, Optional
 from ..client import DuffelClient, DuffelAPIError, get_client
 from ..models.flights import FlightSearchRequest, FlightSearchResponse, FlightLoyaltyProgramme, BaggageService
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import isodate
 import logging
+from langgraph.errors import GraphInterrupt
+
+import json
+
+from src.duffel_client.endpoints.payments import (
+    create_stripe_token,
+    create_stripe_payment_intent,
+    create_stripe_refund
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +139,173 @@ class FlightsEndpoint:
                     except Exception:
                         pass
         return layovers
+    
+    async def cancel_flight_booking_with_refund(
+        self,
+        order_id: str,
+        refund_amount: Optional[float] = None,
+        refund_reason: str = "requested_by_customer",
+        proceed_despite_warnings: bool = False  # New param
+    ) -> Dict[str, Any]:
+        """
+        Cancel a flight booking and issue a Stripe refund if applicable.
+
+        Args:
+            order_id: The ID of the flight order to cancel (e.g., "ord_0000AxNtHvxFHgcXbJQFW4").
+            refund_amount: Optional amount to refund (in order's currency; if None, full refund).
+            refund_reason: Reason for refund (e.g., "requested_by_customer", "duplicate").
+            proceed_despite_warnings: If True, proceed even if non-refundable or past deadline. Default False.
+
+        Returns:
+            Dict with cancellation status and refund details.
+
+        Raises:
+            DuffelAPIError: For API errors during cancellation or refund.
+            GraphInterrupt: If cancellation is not possible due to policy restrictions (unless proceed_despite_warnings=True).
+        """
+        try:
+            # Step 1: Get order details to retrieve metadata and cost
+            logger.info(f"Fetching order details for cancellation: {order_id}")
+            order_response = await self.get_order(order_id)
+            order = order_response.get("data", {})
+            logger.info(f"Order:{order}")
+            if not order:
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Order not found',
+                    'detail': f"Flight order {order_id} not found"
+                })
+
+            # NEW: Check if cancellation is available through the API
+            available_actions = order.get("available_actions", [])
+            if "cancel" not in available_actions:
+                # This order cannot be cancelled through the API
+                carrier_name = "the airline"
+                if order.get("owner", {}).get("name"):
+                    carrier_name = order["owner"]["name"]
+                elif order.get("booking_references") and len(order["booking_references"]) > 0:
+                    carrier_name = order["booking_references"][0].get("carrier", {}).get("name", carrier_name)
+                
+                raise DuffelAPIError({
+                    'type': 'invalid_state_error',
+                    'title': 'Order not cancellable',
+                    'detail': f"This order cannot be cancelled through the API. Please contact {carrier_name} directly to cancel this booking. Available actions: {', '.join(available_actions)}"
+                })
+
+            # Check refund conditions
+            conditions = order.get("conditions", {})
+            refund_before = conditions.get("refund_before_departure", {})
+            if not refund_before.get("allowed", False):
+                if not proceed_despite_warnings:
+                    raise GraphInterrupt(
+                        f"Flight order {order_id} is non-refundable according to the offer conditions. "
+                        "Do you still want to proceed with cancellation (this may be non-refunded)?"
+                    )
+                else:
+                    logger.info(f"Proceeding with cancellation for {order_id} despite non-refundable status (user confirmed).")
+
+            # Determine total cost and currency
+            total_amount = float(order.get("total_amount", 0))
+            total_currency = order.get("total_currency", "AUD")
+            if total_amount <= 0:
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Invalid order data',
+                    'detail': 'No valid total amount found in order'
+                })
+
+            # Check cancellation deadline if available
+            cancel_deadline = None
+            if refund_before.get("before"):
+                try:
+                    cancel_deadline = datetime.fromisoformat(refund_before["before"].replace("Z", "+00:00"))
+                    current_time = datetime.now(tz=timezone.utc)
+                    if current_time > cancel_deadline:
+                        if not proceed_despite_warnings:
+                            raise GraphInterrupt(
+                                f"Cancellation deadline has passed for order {order_id} ({cancel_deadline}). "
+                                "Do you still want to proceed with cancellation (this may be non-refunded)?"
+                            )
+                        else:
+                            logger.info(f"Proceeding with cancellation for {order_id} despite passed deadline (user confirmed).")
+                except ValueError:
+                    logger.warning(f"Invalid cancellation deadline format for order {order_id}")
+
+            # Step 2: Create cancellation request
+            logger.info(f"Creating cancellation request for order {order_id}")
+            create_response = await self.create_order_cancellation(order_id)
+            cancellation_data = create_response.get("data", {})
+            if not cancellation_data or not cancellation_data.get("id"):
+                logger.error(f"Cancellation request failed. API response: {create_response}")
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Cancellation request failed',
+                    'detail': 'Could not create cancellation request'
+                })
+            cancellation_id = cancellation_data["id"]
+
+            # Step 3: Confirm cancellation
+            logger.info(f"Confirming cancellation for order {order_id}, cancellation ID: {cancellation_id}")
+            confirm_response = await self.confirm_order_cancellation(cancellation_id)
+            if not confirm_response.get("data", {}).get("confirmed_at"):
+                logger.error(f"Cancellation confirmation failed. API response: {confirm_response}")
+                raise DuffelAPIError({
+                    'type': 'client_error',
+                    'title': 'Cancellation confirmation failed',
+                    'detail': 'Could not confirm cancellation of the flight order'
+                })
+            logger.info(f"Successfully canceled flight order {order_id}")
+
+            # Update cancellation_data with the confirmed response (includes all fields + confirmed_at)
+            cancellation_data = confirm_response.get("data", {})
+
+            # Step 4: Process Stripe refund if applicable
+            refund_result = {"refund_processed": False, "refund_id": None, "refund_status": None}
+            original_metadata = order.get("metadata", {})
+            stripe_payment_intent_id = original_metadata.get("stripe_payment_intent_id")
+            if stripe_payment_intent_id:
+                try:
+                    logger.info(f"Refunding Stripe Payment Intent: {stripe_payment_intent_id}")
+                    refund_response = await create_stripe_refund(
+                        payment_intent_id=stripe_payment_intent_id,
+                        amount=refund_amount if refund_amount is not None else total_amount,
+                        reason=refund_reason
+                    )
+                    refund_result = {
+                        "refund_processed": True,
+                        "refund_id": refund_response["refund_id"],
+                        "refund_status": refund_response["status"]
+                    }
+                    logger.info(f"Stripe refund successful: {refund_response['refund_id']}, status: {refund_response['status']}")
+                except Exception as refund_error:
+                    logger.error(f"Stripe refund failed: {str(refund_error)}")
+                    refund_result["refund_error"] = str(refund_error)
+            else:
+                logger.warning(f"No Stripe Payment Intent ID found in order metadata for {order_id}; skipping refund")
+
+            return {
+                "status": "success",
+                "order_id": order_id,
+                "cancelled_at": cancellation_data.get("confirmed_at"),
+                "refund_amount": cancellation_data.get("refund_amount"),
+                "refund_currency": cancellation_data.get("refund_currency"),
+                "refund_to": cancellation_data.get("refund_to"),
+                **refund_result
+            }
+
+        except DuffelAPIError as e:
+            logger.error(f"Duffel API error cancelling flight order {order_id}: {e}")
+            raise
+        except GraphInterrupt as gi:
+            logger.info(f"GraphInterrupt during cancellation: {gi}")
+            raise
+        except Exception as e:
+            logger.exception(f"Unexpected error cancelling flight order {order_id}: {e}")
+            raise DuffelAPIError({
+                'type': 'client_error',
+                'title': 'Flight order cancellation failed',
+                'detail': str(e)
+            })
     
     def _parse_flight_offers(self, offers: list) -> list:        
         formatted = []
@@ -429,10 +605,12 @@ async def create_flight_booking(offer_id: str, passengers: list, payments: list,
         
         final_passengers.append(final_passenger)
 
+    logger.info(f"Merged passenger data: {passengers}")
     # 3. Prepare order data
     order_data = {
         "selected_offers": [offer_id],
         "passengers": final_passengers,
+        "metadata": {"stripe_payment_intent_id": payments[0].get("stripe_payment_intent_id")},
         "payments": payments
     }
 
@@ -558,6 +736,9 @@ def format_flights_markdown(flights: list) -> str:
     return "\n".join(md)
 
 # --- Order Cancellation Functions ---
+
+
+
 async def list_order_cancellations(params: dict = None) -> dict:
     """GET /air/order_cancellations: List all order cancellations."""
     client = get_client()
@@ -583,6 +764,48 @@ async def create_order_change_request_api(*, order_id: str, slices: Optional[lis
     client = get_client()
     endpoint = FlightsEndpoint(client)
     return await endpoint.create_order_change_request(order_id=order_id, slices=slices, type=type)
+
+
+async def cancel_flight_booking_with_refund(
+    order_id: str,
+    refund_amount: Optional[float] = None,
+    refund_reason: str = "requested_by_customer",
+    proceed_despite_warnings: bool = False  # New param
+) -> str:
+    """
+    Cancel a flight booking and process a refund using the full Duffel flow:
+    1. Create a pending order cancellation
+    2. Confirm the cancellation
+    3. Process a Stripe refund if applicable
+    Returns a JSON string with the final cancellation and refund result or a clear error message.
+
+    Args:
+        order_id: The ID of the flight order to cancel (e.g., "ord_0000AxNtHvxFHgcXbJQFW4").
+        refund_amount: Optional amount to refund (in order's currency; if None, full refund).
+        refund_reason: Reason for refund (e.g., "requested_by_customer", "duplicate").
+        proceed_despite_warnings: If True, proceed even if non-refundable or past deadline. Default False.
+    """
+    client = get_client()
+    endpoint = FlightsEndpoint(client)
+    try:
+        result = await endpoint.cancel_flight_booking_with_refund(
+            order_id=order_id,
+            refund_amount=refund_amount,
+            refund_reason=refund_reason,
+            proceed_despite_warnings=proceed_despite_warnings  # Pass through
+        )
+        return json.dumps(result)
+    except GraphInterrupt as gi:
+        return json.dumps({"error": str(gi), "requires_confirmation": True})
+    except DuffelAPIError as e:
+        error_data = {
+            'type': e.error.get('type', 'client_error') if hasattr(e, 'error') and isinstance(e.error, dict) else 'client_error',
+            'title': e.error.get('title', 'Cancellation failed') if hasattr(e, 'error') and isinstance(e.error, dict) else 'Cancellation failed',
+            'detail': e.error.get('detail', str(e)) if hasattr(e, 'error') and isinstance(e.error, dict) else str(e)
+        }
+        return json.dumps({"error": f"{error_data['title']}: {error_data['detail']}"})
+    except Exception as e:
+        return json.dumps({"error": f"Unexpected error: {str(e)}"})
 
 
 

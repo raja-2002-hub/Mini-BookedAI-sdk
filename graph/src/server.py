@@ -6,9 +6,20 @@ import os
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging - reduced verbosity for better performance
+logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
+
+# Aggressively suppress LangGraph framework logging
+logging.getLogger("langgraph").setLevel(logging.CRITICAL)
+logging.getLogger("langchain").setLevel(logging.CRITICAL)
+logging.getLogger("langgraph_api").setLevel(logging.CRITICAL)
+logging.getLogger("fastapi").setLevel(logging.CRITICAL)
+logging.getLogger("uvicorn").setLevel(logging.CRITICAL)
+logging.getLogger("uvicorn.access").setLevel(logging.CRITICAL)
+
+# Suppress specific LangGraph execution loggers
+logging.getLogger("__src__agent__graph").setLevel(logging.CRITICAL)
 
 def create_custom_app():
     """Create LangGraph app with proper header injection."""
@@ -17,6 +28,12 @@ def create_custom_app():
     os.environ.setdefault("LANGGRAPH_RUNTIME_EDITION", "inmem")
     os.environ.setdefault("DATABASE_URI", "sqlite:///test.db")
     os.environ.setdefault("REDIS_URI", "redis://localhost:6379")
+    
+    # Completely disable LangGraph execution logging
+    os.environ.setdefault("LANGGRAPH_LOG_LEVEL", "CRITICAL")
+    os.environ.setdefault("LANGGRAPH_DEBUG", "false")
+    os.environ.setdefault("LANGGRAPH_VERBOSE", "false")
+    os.environ.setdefault("PYTHONWARNINGS", "ignore")
     
     # Import after setting environment variables
     from langgraph_api.server import create_app as create_langgraph_app
@@ -32,8 +49,8 @@ def create_custom_app():
         # Extract all headers from the request
         headers = dict(request.headers)
         
-        # Log the headers being processed
-        logger.info(f"[SERVER] Processing request with headers: {list(headers.keys())}")
+        # Log the headers being processed 
+        logger.debug(f"[SERVER] Processing request with headers: {list(headers.keys())}")
         
         # Store headers in request state for the graph to access
         request.state.injected_headers = headers
@@ -63,7 +80,7 @@ def create_custom_app():
                 kwargs['metadata'] = {}
             kwargs['metadata']['headers'] = headers
             
-            logger.info(f"[SERVER] Injected headers into graph execution: {list(headers.keys())}")
+            logger.debug(f"[SERVER] Injected headers into graph execution: {list(headers.keys())}")
         
         return await original_stream(*args, **kwargs)
     
@@ -77,5 +94,5 @@ app = create_custom_app()
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info("Starting LangGraph server with proper header injection on port 2024")
-    uvicorn.run(app, host="0.0.0.0", port=2024, log_level="info")
+    logger.debug("Starting LangGraph server with proper header injection on port 2024")
+    uvicorn.run(app, host="0.0.0.0", port=2024, log_level="critical")

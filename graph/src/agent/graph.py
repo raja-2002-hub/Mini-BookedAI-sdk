@@ -38,6 +38,8 @@ from langgraph.prebuilt import ToolNode
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from typing import Literal
+from langgraph.checkpoint.memory import MemorySaver
+import psycopg
 
 # Import our Duffel client
 from src.duffel_client.endpoints.stays import search_hotels, fetch_hotel_rates, create_quote, create_booking, cancel_hotel_booking, update_hotel_booking, extend_hotel_stay
@@ -53,14 +55,9 @@ from src.duffel_client.endpoints.flights import (
     create_order_change_request_api,  # Only this is needed for changing flights
 )
 
-from src.duffel_client.endpoints.flights import create_order_cancellation, confirm_order_cancellation
+from src.duffel_client.endpoints.flights import create_order_cancellation, confirm_order_cancellation, cancel_flight_booking_with_refund
 
 from src.duffel_client.endpoints.payments import (
-    build_card_payment,
-    create_multi_use_card,
-    create_single_use_from_multi_use,
-    pay_later_for_order,
-    create_balance_payment,
     create_stripe_payment_intent,
     create_stripe_token
 )
@@ -103,6 +100,7 @@ def get_current_user_id() -> str:
     """Get the current user ID for mem0 operations."""
     return user_id_manager.current_user_id
 
+logger = logging.getLogger(__name__)
 
 TOOL_UI_MAPPING = {
     "search_hotels_tool": "hotelResults",
@@ -262,211 +260,6 @@ async def validate_phone_number_tool(phone: str, client_country: str | None = No
         
     except NumberParseException as e:
         return f"Error: Invalid phone number: {e}"
-
-def is_live_duffel_token(token: str) -> bool:
-    """
-    Check if we're using a live Duffel API token.
-    Live tokens typically start with 'live_' while test tokens start with 'test_'.
-    """
-    if not token:
-        return False
-    return token.startswith('live_')
-## PAYMENTS ##
-
-@tool
-async def capture_payment_tool(
-    payment_type: str,
-    resource_id: str,
-    card_details: dict = None,
-    multi_use_card_id: str = None,
-    cvc: str = None,
-    expiry_month: str = None,
-    expiry_year: str = None,
-    balance_amount: str = None,
-    balance_currency: str = None,
-    services: list = None
-) -> str:
-    """
-    Capture payment information and create payment object for booking.
-    
-    This tool handles the complete payment flow:
-    1. For balance payments: Creates balance payment object
-    2. For new cards: Tokenizes card and creates 3DS session (live mode) OR uses balance (test mode)
-    3. For multi-use cards: Creates single-use card and 3DS session (live mode) OR uses balance (test mode)
-    
-    IMPORTANT: In test mode (test_* tokens), card payments are automatically converted to balance payments
-    for demonstration purposes. In live mode (live_* tokens), actual card processing occurs.
-    
-    Args:
-        payment_type: "balance", "card", or "multi_use_card"
-        resource_id: offer_id (flights), quote_id (hotels), or order_id (pay later)
-        card_details: Full card information for new cards
-        multi_use_card_id: Existing multi-use card ID
-        cvc: CVC for multi-use card derived payment
-        expiry_month: Expiry month for multi-use card derived payment
-        expiry_year: Expiry year for multi-use card derived payment
-        balance_amount: Amount for balance payment
-        balance_currency: Currency for balance payment
-        services: Optional services for 3DS session
-    
-    Returns:
-        JSON string with payment object ready for booking
-    """
-    logger.info(f"Payment capture initiated - type: {payment_type}, resource: {resource_id}")
-    
-    if not config.DUFFEL_API_TOKEN:
-        logger.error("Duffel API token not configured")
-        return "Payment capture is currently unavailable. Please configure the Duffel API token."
-    
-    # Check if we're in live mode
-    is_live = is_live_duffel_token(config.DUFFEL_API_TOKEN)
-    logger.info(f"Payment mode: {'LIVE' if is_live else 'TEST'}")
-    
-    try:
-        if payment_type == "balance":
-            if not balance_amount or not balance_currency:
-                return "Error: balance_amount and balance_currency are required for balance payments"
-            
-            payment = await create_balance_payment(balance_amount, balance_currency)
-            logger.info("Balance payment created successfully")
-            
-        elif payment_type == "card":
-            if not card_details:
-                return "Error: card_details are required for new card payments"
-            
-            if is_live:
-                # Live mode: Use actual card payment flow
-                logger.info("LIVE MODE: Processing actual card payment")
-                payment = await build_card_payment(
-                    card_details, 
-                    resource_id, 
-                    config.DUFFEL_API_TOKEN,
-                    multi_use=False
-                )
-                logger.info("Card payment created successfully in live mode")
-            else:
-                # Test mode: Convert to balance payment for demonstration
-                logger.info("TEST MODE: Converting card payment to balance payment for demonstration")
-                
-                # Extract amount from card_details if available, otherwise use default
-                amount = card_details.get("amount", "100.00")
-                currency = card_details.get("currency", "USD")
-                
-                # Create balance payment instead
-                payment = await create_balance_payment(amount, currency)
-                logger.info(f"TEST MODE: Created balance payment of {amount} {currency} instead of card payment")
-                
-                # Add a note about the conversion
-                payment["_test_mode_note"] = "Card payment converted to balance payment for test environment"
-            
-        elif payment_type == "multi_use_card":
-            if not multi_use_card_id or not cvc or not expiry_month or not expiry_year:
-                return "Error: multi_use_card_id, cvc, expiry_month, and expiry_year are required for multi-use card payments"
-            
-            if is_live:
-                # Live mode: Use actual multi-use card flow
-                logger.info("LIVE MODE: Processing actual multi-use card payment")
-                
-                # Create single-use card from multi-use
-                card_resp = await create_single_use_from_multi_use(
-                    multi_use_card_id, cvc, expiry_month, expiry_year, config.DUFFEL_API_TOKEN
-                )
-                card_id = card_resp["data"]["id"]
-                
-                # Create 3DS session
-                from src.duffel_client.endpoints.payments import create_3ds_session
-                three_ds_resp = await create_3ds_session(
-                    card_id, resource_id, config.DUFFEL_API_TOKEN, services
-                )
-                three_ds_id = three_ds_resp["data"]["id"]
-                
-                payment = {
-                    "type": "card",
-                    "card_id": card_id,
-                    "three_d_secure_session_id": three_ds_id
-                }
-                logger.info("Multi-use card payment created successfully in live mode")
-            else:
-                # Test mode: Convert to balance payment for demonstration
-                logger.info("TEST MODE: Converting multi-use card payment to balance payment for demonstration")
-                
-                # Use default amount/currency for test
-                payment = await create_balance_payment("100.00", "USD")
-                logger.info("TEST MODE: Created balance payment instead of multi-use card payment")
-                
-                # Add a note about the conversion
-                payment["_test_mode_note"] = "Multi-use card payment converted to balance payment for test environment"
-            
-        else:
-            return f"Error: Invalid payment_type '{payment_type}'. Must be 'balance', 'card', or 'multi_use_card'"
-        
-        return json.dumps({"payment": payment, "status": "success", "mode": "live" if is_live else "test"})
-        
-    except Exception as e:
-        logger.error(f"Payment capture failed: {str(e)}", exc_info=True)
-        return f"Payment capture error: {str(e)}"
-
-@tool
-async def create_multi_use_card_tool(card_details: dict) -> str:
-    """
-    Create a multi-use card for future payments.
-    
-    Args:
-        card_details: Card information (CVC will not be stored)
-    
-    Returns:
-        JSON string with multi-use card details
-    """
-    logger.info("Creating multi-use card")
-    
-    if not config.DUFFEL_API_TOKEN:
-        logger.error("Duffel API token not configured")
-        return "Multi-use card creation is currently unavailable. Please configure the Duffel API token."
-    
-    try:
-        # Remove CVC from card details for multi-use cards
-        if "cvc" in card_details:
-            card_details = card_details.copy()
-            del card_details["cvc"]
-        
-        response = await create_multi_use_card(card_details, config.DUFFEL_API_TOKEN)
-        logger.info("Multi-use card created successfully")
-        return json.dumps(response)
-        
-    except Exception as e:
-        logger.error(f"Multi-use card creation failed: {str(e)}", exc_info=True)
-        return f"Multi-use card creation error: {str(e)}"
-
-@tool
-async def pay_later_tool(order_id: str, payment: dict) -> str:
-    """
-    Pay for a hold order later.
-    
-    Args:
-        order_id: The hold order ID
-        payment: Payment object (from capture_payment_tool)
-    
-    Returns:
-        JSON string with payment confirmation
-    """
-    logger.info(f"Processing pay later for order: {order_id}")
-    
-    if not config.DUFFEL_API_TOKEN:
-        logger.error("Duffel API token not configured")
-        return "Pay later is currently unavailable. Please configure the Duffel API token."
-    
-    try:
-        response = await pay_later_for_order(order_id, payment, config.DUFFEL_API_TOKEN)
-        logger.info("Pay later processed successfully")
-        return json.dumps(response)
-        
-    except Exception as e:
-        logger.error(f"Pay later failed: {str(e)}", exc_info=True)
-        return f"Pay later error: {str(e)}"
-    
-## PAYMENTS ##
-
-
 
 @tool
 async def search_flights_tool(
@@ -988,8 +781,8 @@ async def extend_hotel_stay_tool(
     logger.info(f"Extend hotel stay initiated for booking: {booking_id}, check-in: {check_in_date}, check-out: {check_out_date}")
     try:
         # Normalize dates
-        check_in_date = parse_and_normalize_date(check_in_date)
-        check_out_date = parse_and_normalize_date(check_out_date)
+        check_in_date = await parse_and_normalize_date(check_in_date)
+        check_out_date = await parse_and_normalize_date(check_out_date)
         logger.debug(f"Normalized dates - Check-in: {check_in_date}, Check-out: {check_out_date}")
 
         # Validate dates
@@ -1193,52 +986,38 @@ async def flight_payment_sequence_tool(
         })
     
     # STEP 3 — Process payment
-    is_live = is_live_duffel_token(config.DUFFEL_API_TOKEN)
-    logger.info(f"Flight payment sequence mode: {'LIVE' if is_live else 'TEST'}")
         
     logger.info("Step 2: Processing payment")
-    if not is_live:
-        logger.info(f"Stripe Integration: Creating test balance payment::{payment_method}")
-        card_details = {
-            "card[number]": payment_method.get("card_number"),
-            "card[exp_month]": payment_method.get("expiry_month"),
-            "card[exp_year]": payment_method.get("expiry_year"),
-            "card[cvc]": payment_method.get("cvc") or payment_method.get("cvv"),
-            "card[name]": payment_method.get("cardholder_name")
-        }
-        token_response = await create_stripe_token(card_details)
-        token_id = token_response["token_id"]
-        logger.info(f"Created Stripe token: {token_id}")
+    logger.info(f"Stripe Integration: Creating test balance payment::{payment_method}")
+    card_details = {
+        "card[number]": payment_method.get("card_number"),
+        "card[exp_month]": payment_method.get("expiry_month"),
+        "card[exp_year]": payment_method.get("expiry_year"),
+        "card[cvc]": payment_method.get("cvc") or payment_method.get("cvv"),
+        "card[name]": payment_method.get("cardholder_name")
+    }
+    token_response = await create_stripe_token(card_details)
+    token_id = token_response["token_id"]
+    logger.info(f"Created Stripe token: {token_id}")
 
-        # Create Stripe Payment Intent
-        intent_response = await create_stripe_payment_intent(
-            amount=amount,
-            currency=currency,
-            token_id=token_id,
-            return_url="https://your-server.com/return"
-        )
-        payment_intent_id = intent_response["payment_intent_id"]
-        logger.info(f"Created Stripe Payment Intent: {payment_intent_id}")
-        
-        # Create payment object for Duffel
-        payment = {
-            "type": "balance",  
-            "amount": amount,
-            "currency": currency,
-            "stripe_payment_intent_id": payment_intent_id
-        }
-        payments = [payment]
-    else:
-        if payment_method.get("type") == "balance":
-            # Balance payment - use directly                
-            payments = [await create_balance_payment(amount, currency)]
-        else: 
-            # Card payment - handle based on mode
-            payment = await build_card_payment(
-                    payment_method, offer_id, config.DUFFEL_API_TOKEN
-                )
-            payments = [payment]
-            logger.info(f"Live card: {payments}")             
+    # Create Stripe Payment Intent
+    intent_response = await create_stripe_payment_intent(
+        amount=amount,
+        currency=currency,
+        token_id=token_id,
+        return_url="https://your-server.com/return"
+    )
+    payment_intent_id = intent_response["payment_intent_id"]
+    logger.info(f"Created Stripe Payment Intent: {payment_intent_id}")
+    
+    # Create payment object for Duffel
+    payment = {
+        "type": "balance",  
+        "amount": amount,
+        "currency": currency,
+        "stripe_payment_intent_id": payment_intent_id
+    }
+    payments = [payment]       
     
     # STEP 4 — Build services list if selected seats provided
     services = []
@@ -1260,10 +1039,6 @@ async def flight_payment_sequence_tool(
         # Direct function call instead of tool
         booking_result = await create_flight_booking(offer_id, passengers, payments,services=services if services else None)
         logger.info("Flight payment sequence completed successfully")
-        
-        # Add mode information to response
-        if isinstance(booking_result, dict):
-            booking_result["_payment_mode"] = "live" if is_live else "test"
         
         return json.dumps(booking_result)
     except Exception as e:
@@ -1360,15 +1135,10 @@ async def hotel_payment_sequence_tool(
                 "stay_special_requests": stay_special_requests               
             }
         })
-    # Check if we're in live mode
-    is_live = is_live_duffel_token(config.DUFFEL_API_TOKEN)
-    logger.info(f"Test mode confirmation - is_live: {is_live}, token prefix: {config.DUFFEL_API_TOKEN[:6]}...")
-    logger.info(f"Hotel payment sequence mode: {'LIVE' if is_live else 'TEST'}")
     
     try:
         # Step 1: Create quote
         logger.info("Step 1: Creating quote")
-        # quote_data = await create_quote(rate_id)
         
         if "error" in quote_data:
             if "rate_unavailable" in quote_data["error"]:
@@ -1386,49 +1156,33 @@ async def hotel_payment_sequence_tool(
             return json.dumps({"error": "Could not extract quote ID from response"})
         
         # Step 2: Process payment
-        logger.info("Step 2: Processing payment")
-        if not is_live:
-            logger.info(f"Stripe Integration: Creating test balance payment::{payment_method}")
-            card_details = {
-                "card[number]": payment_method.get("card_number"),
-                "card[exp_month]": payment_method.get("expiry_month"),
-                "card[exp_year]": payment_method.get("expiry_year"),
-                "card[cvc]": payment_method.get("cvc") or payment_method.get("cvv"),
-                "card[name]": payment_method.get("cardholder_name")
-            }
-            token_response = await create_stripe_token(card_details)
-            token_id = token_response["token_id"]
-            logger.info(f"Created Stripe token: {token_id}")
+        logger.info("Step 2: Processing payment")        
+        logger.info(f"Stripe Integration: Creating balance payment::{payment_method}")
+        card_details = {
+            "card[number]": payment_method.get("card_number"),
+            "card[exp_month]": payment_method.get("expiry_month"),
+            "card[exp_year]": payment_method.get("expiry_year"),
+            "card[cvc]": payment_method.get("cvc") or payment_method.get("cvv"),
+            "card[name]": payment_method.get("cardholder_name")
+        }
+        token_response = await create_stripe_token(card_details)
+        token_id = token_response["token_id"]
+        logger.info(f"Created Stripe token: {token_id}")
 
-            # Create Stripe Payment Intent
-            intent_response = await create_stripe_payment_intent(
-                amount=total_amount,
-                currency=total_currency,
-                token_id=token_id,
-                return_url="https://your-server.com/return"
-            )
-            payment_intent_id = intent_response["payment_intent_id"]
-            logger.info(f"Created Stripe Payment Intent: {payment_intent_id}")
-            
-            # Create payment object for Duffel
-            payment = {
-                "type": "balance",  
-                "amount": str(total_amount),
-                "currency": total_currency,
-                "stripe_payment_intent_id": payment_intent_id
-            }
-        else:
-            # LIVE MODE - process actual card payment
-            if payment_method.get("type") == "balance":
-                payments = [payment_method]
-                logger.info(f"Live balance: {payments}")
-            else:
-                try:
-                    payment = await build_card_payment(
-                        payment_method, quote_id, config.DUFFEL_API_TOKEN
-                    )
-                except Exception as e:
-                    return json.dumps({"error": f"Payment processing failed: {str(e)}"})
+        # Create Stripe Payment Intent
+        intent_response = await create_stripe_payment_intent(
+            amount=total_amount,
+            currency=total_currency,
+            token_id=token_id,
+            return_url="https://your-server.com/return"
+        )
+        payment_intent_id = intent_response["payment_intent_id"]
+        logger.info(f"Created Stripe Payment Intent: {payment_intent_id}")
+        
+        # Create payment object for Duffel
+        payment = {
+            "stripe_payment_intent_id": payment_intent_id
+        }        
         
         # Step 3: Create booking
         logger.info("Step 3: Creating booking")
@@ -1442,12 +1196,7 @@ async def hotel_payment_sequence_tool(
             payment=payment if payment else None
         )
         
-        logger.info("Hotel payment sequence completed successfully")
-        
-        # Add mode information to response
-        if isinstance(booking_result, dict):
-            booking_result["_payment_mode"] = "live" if is_live else "test"
-        
+        logger.info("Hotel payment sequence completed successfully")        
         return json.dumps(booking_result)
         
     except Exception as e:
@@ -1541,30 +1290,39 @@ async def accept_airline_initiated_change_tool(change_id: str) -> str:
         return f"Error accepting airline-initiated change: {str(e)}"
 
 @tool
-def cancel_flight_booking_tool(order_id: str) -> str:
+async def cancel_flight_booking_tool(
+    order_id: str,
+    proceed_despite_warnings: bool = False  # New param
+) -> str:
     """
-    Cancel a flight booking by order ID using the full Duffel flow:
-    1. Create a pending order cancellation
-    2. Confirm the cancellation
-    Returns a JSON string with the final cancellation result or a clear error message.
+    Cancel a flight booking and optionally process a refund.
+    
+    If the booking is non-refundable or past the cancellation deadline, this tool will return an error requiring user confirmation.
+    On the next call, set proceed_despite_warnings=True to force proceed (even if no refund is issued).
+    
+    Args:
+        order_id: The flight order ID to cancel (e.g., "ord_0000AxNtHvxFHgcXbJQFW4").
+        proceed_despite_warnings: Set to True if the user has confirmed to proceed even if non-refundable or past deadline. Default False.
+        
+    Returns:
+        JSON string with cancellation details or error message.
     """
-    import asyncio
-    import json
-    async def do_cancel():
-        try:
-            # Step 1: Create the cancellation
-            create_resp = await create_order_cancellation(order_id)
-            cancellation_data = create_resp.get("data")
-            if not cancellation_data or not cancellation_data.get("id"):
-                return json.dumps({"error": "Could not create cancellation or missing cancellation ID.", "raw": create_resp})
-            cancellation_id = cancellation_data["id"]
-            # Step 2: Confirm the cancellation
-            from src.duffel_client.endpoints.flights import confirm_order_cancellation
-            confirm_resp = await confirm_order_cancellation(cancellation_id)
-            return json.dumps(confirm_resp)
-        except Exception as e:
-            return json.dumps({"error": f"Cancellation failed: {str(e)}"})
-    return asyncio.run(do_cancel())
+    try:
+        return await cancel_flight_booking_with_refund(
+            order_id=order_id,
+            proceed_despite_warnings=proceed_despite_warnings 
+        )
+    except GraphInterrupt as gi:
+            return json.dumps({"error": str(gi), "requires_confirmation": True})
+    except DuffelAPIError as e:
+            error_data = {
+                'type': e.error.get('type', 'client_error') if hasattr(e, 'error') and isinstance(e.error, dict) else 'client_error',
+                'title': e.error.get('title', 'Cancellation failed') if hasattr(e, 'error') and isinstance(e.error, dict) else 'Cancellation failed',
+                'detail': e.error.get('detail', str(e)) if hasattr(e, 'error') and isinstance(e.error, dict) else str(e)
+            }
+            return json.dumps({"error": f"{error_data['title']}: {error_data['detail']}"})
+    except Exception as e:
+            return json.dumps({"error": f"Unexpected error: {str(e)}"})
 
 @tool
 async def cancel_hotel_booking_tool(booking_id: str) -> str:
@@ -1901,8 +1659,7 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
         change_flight_booking_tool,
         cancel_flight_booking_tool,
         cancel_hotel_booking_tool,
-        update_hotel_booking_tool,
-        pay_later_tool,
+        update_hotel_booking_tool,        
         flight_payment_sequence_tool,
         hotel_payment_sequence_tool,
         list_loyalty_programmes_tool,
@@ -1919,17 +1676,33 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
     # System prompt
     system_prompt = """
 <identity>
-You are a helpful AI assistant for BookedAI, specializing in travel assistance
+You are Luna, a knowledgeable and personable AI travel consultant for BookedAI. You combine the expertise of a seasoned travel agent with the efficiency of AI to create perfectly tailored travel experiences.
 </identity>
 
+<personality>
+- Warm, enthusiastic, and genuinely excited about helping people discover amazing travel experiences
+- Professional yet conversational - like talking to a friend who happens to be a travel expert
+- Patient and thorough, ensuring no detail is overlooked
+- Culturally aware and sensitive to different travel styles and preferences
+</personality>
+
 <instructions>
-Help the user with their travel plans in a conversational, personal way.
+Act as a proactive travel consultant who builds a complete understanding of each traveler's unique needs before making recommendations. Guide users through a personalized consultation process to uncover their ideal trip.
 </instructions>
 
  <memory_instructions>
  Store user preferences with remember_tool when they mention likes/dislikes, including food preferences, travel preferences, and personal preferences that could be relevant for travel planning. Remember user preferences (food, activities, etc.) that could be relevant for travel planning. When searching for preferences, use recall_tool with specific terms from the user's request (e.g., "paris", "melbourne", "window seat") along with generic queries. Use recall_tool when you need to search for existing memories, but don't call it after remember_tool unless specifically needed.
  </memory_instructions>
 
+<response_format>
+When providing recommendations:
+- Start with a brief summary of understanding their needs
+- Present options in order of best match to preferences
+- Include specific reasons why each suggestion suits them
+- Add "insider tips" or "local secrets" to add value
+- Mention potential drawbacks honestly
+- End with a question to guide next steps
+</response_format>
 
 <rules>
 Only discuss travel related topics.
@@ -1996,12 +1769,9 @@ Since rich UI components (hotel cards, flight results, etc.) will be displayed t
     response = llm_with_tools.invoke(messages)
 
     ui_enabled = state.get("ui_enabled", True)
-    logger.info(f"UI enabled: {ui_enabled}")
-
+    
     # Handle push UI message with improved logic for multiple tool calls
-    logger.info(f"[UI PROCESSING] Starting UI component processing - UI enabled: {ui_enabled}")
     if ui_enabled:
-        logger.info(f"[UI PROCESSING] Total messages in state: {len(state['messages'])}")
         
         # Find all recent tool messages that could need UI components
         # Look for tool messages that came after the last human/AI message
@@ -2021,71 +1791,36 @@ Since rich UI components (hotel cards, flight results, etc.) will be displayed t
                 # Stop when we hit a non-tool message (start of this tool sequence)
                 break
         
-        logger.info(f"[UI PROCESSING] Found {len(recent_tool_messages)} recent tool messages to process for UI")
-        
-        # Log details of each tool message found
-        for idx, tool_msg in enumerate(recent_tool_messages):
-            logger.debug(f"[UI PROCESSING] Tool message {idx}: name={tool_msg.name}, content_length={len(tool_msg.content)}")
-        
         # Process each tool message for potential UI
         ui_components_created = 0
         for idx, tool_message in enumerate(recent_tool_messages):
-            logger.info(f"[UI PROCESSING] Processing tool message {idx+1}/{len(recent_tool_messages)}: {tool_message.name}")
-            
             try:
                 # Parse tool result data
-                logger.debug(f"[UI PROCESSING] Parsing JSON content from {tool_message.name}")
                 tool_data = json.loads(tool_message.content)
-                logger.info(f"[UI PROCESSING] Successfully parsed JSON for {tool_message.name} - data type: {type(tool_data)}")
-                
-                # Log a sample of the data structure (safely)
-                if isinstance(tool_data, dict):
-                    logger.debug(f"[UI PROCESSING] Data keys for {tool_message.name}: {list(tool_data.keys())}")
-                    # Log size of main data arrays if present
-                    for key in ['hotels', 'flights', 'results']:
-                        if key in tool_data and isinstance(tool_data[key], list):
-                            logger.info(f"[UI PROCESSING] {tool_message.name} has {len(tool_data[key])} items in '{key}' array")
                 
                 # Use decision function to determine if UI should be pushed
-                logger.info(f"[UI PROCESSING] Calling should_push_ui_message for {tool_message.name}")
                 should_push, ui_type = should_push_ui_message(tool_message, tool_data)
-                logger.info(f"[UI PROCESSING] Decision for {tool_message.name}: should_push={should_push}, ui_type={ui_type}")
                 
                 if should_push and ui_type:
-                    logger.info(f"[UI PROCESSING] ✓ Pushing UI message for {ui_type} from tool {tool_message.name}")
-                    logger.debug(f"[UI PROCESSING] UI data summary - type: {ui_type}, data_fields: {len(tool_data) if isinstance(tool_data, dict) else 'N/A'}")
-                    
                     # Attempt the actual UI push
                     try:
-                        logger.debug(f"[UI PROCESSING] Calling push_ui_message with ui_type='{ui_type}'")
                         push_ui_message(ui_type, tool_data, message=response)
                         ui_components_created += 1
-                        logger.info(f"[UI PROCESSING] ✓ Successfully pushed UI component #{ui_components_created} for {tool_message.name}")
                     except Exception as push_error:
                         logger.error(f"[UI PROCESSING] ✗ Failed to push UI component for {tool_message.name}: {push_error}", exc_info=True)
-                        logger.error(f"[UI PROCESSING] Push error details - ui_type: {ui_type}, data_type: {type(tool_data)}")
-                    
-                else:
-                    logger.info(f"[UI PROCESSING] ✗ Not pushing UI for {tool_message.name}: should_push={should_push}, ui_type={ui_type}")
                     
             except json.JSONDecodeError as e:
                 logger.warning(f"[UI PROCESSING] ✗ Failed to parse tool result as JSON for UI from {tool_message.name}: {e}")
-                logger.debug(f"[UI PROCESSING] Raw content (first 200 chars): {tool_message.content[:200]}...")
             except Exception as e:
                 logger.error(f"[UI PROCESSING] ✗ Unexpected error processing UI message for {tool_message.name}: {e}", exc_info=True)
         
-        logger.info(f"[UI PROCESSING] UI processing complete - created {ui_components_created} UI components")
-        
         if ui_components_created > 0:
-            logger.info(f"[UI PROCESSING] ✓ Successfully created {ui_components_created} UI components for this agent response")
-            # Optionally modify the text response to be more concise since UI will show details
-            logger.debug("[UI PROCESSING] UI components will show detailed results, text response will be concise")
+            logger.debug(f"[UI PROCESSING] ✓ Created {ui_components_created} UI components")
         else:
-            logger.info(f"[UI PROCESSING] No UI components created - all {len(recent_tool_messages)} tool messages were rejected for UI display")
+            logger.debug(f"[UI PROCESSING] No UI components created")
     else:
-        logger.info("[UI PROCESSING] UI disabled - skipping all UI component processing")
+        logger.debug("[UI PROCESSING] UI disabled - skipping UI component processing")
 
-    logger.info("[UI PROCESSING] Agent node completed, returning response")
     return {"messages": [response]}
 
 
@@ -2100,12 +1835,12 @@ def human_input_node(state: AgentState) -> Dict[str, Any]:
 async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
     logger.info("Context preparation started - Hybrid approach (checkpointer + mem0)")
     
-    # Debug logging
-    logger.info(f"State keys: {list(state.keys())}")
-    logger.info(f"Configurable: {state.get('configurable', {})}")
-    logger.info(f"Metadata: {state.get('metadata', {})}")
-    logger.info(f"Headers in state: {state.get('headers', 'NOT_FOUND')}")
-    logger.info(f"Full state: {state}")
+    # Debug logging (reduced verbosity for performance)
+    logger.debug(f"State keys: {list(state.keys())}")
+    logger.debug(f"Configurable: {state.get('configurable', {})}")
+    logger.debug(f"Metadata: {state.get('metadata', {})}")
+    logger.debug(f"Headers in state: {state.get('headers', 'NOT_FOUND')}")
+    # Removed full state logging to improve performance
     
     # Try to access user_id from the request body directly
     # The bodyParameters function should have injected it
@@ -2113,22 +1848,22 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
         # Check if there's a request body in the state
         if 'request_body' in state:
             request_body = state.get('request_body', {})
-            logger.info(f"🔍 [AUTH DEBUG] Request body: {request_body}")
+            logger.debug(f"🔍 [AUTH DEBUG] Request body: {request_body}")
             if isinstance(request_body, dict) and 'configurable' in request_body:
                 body_configurable = request_body.get('configurable', {})
-                logger.info(f"🔍 [AUTH DEBUG] Body configurable: {body_configurable}")
+                logger.debug(f"🔍 [AUTH DEBUG] Body configurable: {body_configurable}")
                 if 'user_id' in body_configurable:
-                    logger.info(f"🔍 [AUTH DEBUG] Found user_id in request body: {body_configurable['user_id']}")
+                    logger.debug(f"🔍 [AUTH DEBUG] Found user_id in request body: {body_configurable['user_id']}")
         
         # Check if user_id is directly in the state (from bodyParameters injection)
         state_user_id = state.get('user_id')
         if state_user_id:
-            logger.info(f"🔍 [AUTH DEBUG] Found user_id directly in state: {state_user_id}")
+            logger.debug(f"🔍 [AUTH DEBUG] Found user_id directly in state: {state_user_id}")
             
         # Check if authenticated is in state
         state_authenticated = state.get('authenticated')
         if state_authenticated:
-            logger.info(f"🔍 [AUTH DEBUG] Found authenticated directly in state: {state_authenticated}")
+            logger.debug(f"🔍 [AUTH DEBUG] Found authenticated directly in state: {state_authenticated}")
             
         # Check messages for user_id/authenticated in additional_kwargs (scan most recent first)
         messages = state.get('messages', [])
@@ -2330,19 +2065,19 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
     
     # Log comprehensive user info
     user_display = user_email or user_metadata.get("username") or user_id
-    logger.info(f"👤 [CONTEXT PREP] Using user: {user_display} (ID: {user_id})")
-    logger.info(f"👤 [CONTEXT PREP] User metadata: {user_metadata}")
+    logger.debug(f"👤 [CONTEXT PREP] Using user: {user_display} (ID: {user_id})")
+    logger.debug(f"👤 [CONTEXT PREP] User metadata: {user_metadata}")
     
     out_messages = []
     
     # Process user input and extract entities
     if user_input:
-        logger.info(f"Processing user input: {user_input}")
+        logger.debug(f"Processing user input: {user_input}")
         
         # Extract entities from user input
         try:
             entities = await extract_entities(user_input)
-            logger.info(f"Extracted entities: {entities}")
+            logger.debug(f"Extracted entities: {entities}")
             # Keep entity extraction silent
         except Exception as e:
             logger.warning(f"Entity extraction failed: {e}")
@@ -2750,12 +2485,15 @@ async def recall_tool(query: str, top_k: int = 6) -> str:
     Simple memory recall with debug logging.
     """
     # Skip mem0 for guest users - they should rely on conversational history
-    current_user = get_current_user_id()
-    logger.info(f"[RECALL DEBUG] Current user ID from get_current_user_id(): '{current_user}'")
-    logger.info(f"[RECALL DEBUG] User ID manager state: {user_id_manager.current_user_id}")
+    try:
+        current_user = get_current_user_id()
+        logger.debug(f"[RECALL DEBUG] Current user ID from get_current_user_id(): '{current_user}'")
+    except ValueError:
+        logger.debug(f"[RECALL DEBUG] No user ID set, skipping mem0 search for: '{query}'")
+        return "No persistent memories available - user not authenticated."
     
     if current_user in ["anonymous-user", "anonymous", "guest"] or not current_user or not current_user.startswith("user_"):
-        logger.info(f"[RECALL DEBUG] Skipping mem0 search for guest/anonymous user: '{query}' (user_id: {current_user})")
+        logger.debug(f"[RECALL DEBUG] Skipping mem0 search for guest/anonymous user: '{query}' (user_id: {current_user})")
         return "No persistent memories available for guest users."
     
     if not config.MEM0_API_KEY:
@@ -2772,55 +2510,55 @@ async def recall_tool(query: str, top_k: int = 6) -> str:
         
         # 1. Simple search without version
         try:
-            logger.info(f"[RECALL DEBUG] Trying simple search for: '{query}'")
+            logger.debug(f"[RECALL DEBUG] Trying simple search for: '{query}'")
             def _sync_search_simple():
                 client = MemoryClient(api_key=config.MEM0_API_KEY)
                 return client.search(query, filters={"user_id": get_current_user_id()})
             simple_results = await asyncio.to_thread(_sync_search_simple)
-            logger.info(f"[RECALL DEBUG] Simple search returned {len(simple_results or [])} results")
+            logger.debug(f"[RECALL DEBUG] Simple search returned {len(simple_results or [])} results")
             if simple_results:
                 search_results.extend(simple_results)
         except Exception as e:
-            logger.error(f"[RECALL DEBUG] Simple search failed: {e}")
+            logger.warning(f"[RECALL DEBUG] Simple search failed: {e}")
         
         # 2. Search with v2 version
         try:
-            logger.info(f"[RECALL DEBUG] Trying v2 search for: '{query}'")
+            logger.debug(f"[RECALL DEBUG] Trying v2 search for: '{query}'")
             def _sync_search_v2():
                 client = MemoryClient(api_key=config.MEM0_API_KEY)
                 return client.search(query, version="v2", filters={"user_id": get_current_user_id()})
             v2_results = await asyncio.to_thread(_sync_search_v2)
-            logger.info(f"[RECALL DEBUG] V2 search returned {len(v2_results or [])} results")
+            logger.debug(f"[RECALL DEBUG] V2 search returned {len(v2_results or [])} results")
             if v2_results:
                 search_results.extend(v2_results)
         except Exception as e:
-            logger.error(f"[RECALL DEBUG] V2 search failed: {e}")
+            logger.warning(f"[RECALL DEBUG] V2 search failed: {e}")
         
         # 3. Search without filters (all memories)
         try:
-            logger.info(f"[RECALL DEBUG] Trying search without filters for: '{query}'")
+            logger.debug(f"[RECALL DEBUG] Trying search without filters for: '{query}'")
             def _sync_search_no_filter():
                 client = MemoryClient(api_key=config.MEM0_API_KEY)
                 return client.search(query)
             no_filter_results = await asyncio.to_thread(_sync_search_no_filter)
-            logger.info(f"[RECALL DEBUG] No-filter search returned {len(no_filter_results or [])} results")
+            logger.debug(f"[RECALL DEBUG] No-filter search returned {len(no_filter_results or [])} results")
             if no_filter_results:
                 search_results.extend(no_filter_results)
         except Exception as e:
-            logger.error(f"[RECALL DEBUG] No-filter search failed: {e}")
+            logger.warning(f"[RECALL DEBUG] No-filter search failed: {e}")
         
         # 4. List all memories to see what's available
         try:
-            logger.info(f"[RECALL DEBUG] Listing all memories in namespace: '{get_current_user_id()}'")
+            logger.debug(f"[RECALL DEBUG] Listing all memories in namespace: '{get_current_user_id()}'")
             def _sync_list_all():
                 client = MemoryClient(api_key=config.MEM0_API_KEY)
                 return client.search("*", filters={"user_id": get_current_user_id()})
             all_memories = await asyncio.to_thread(_sync_list_all)
-            logger.info(f"[RECALL DEBUG] Total memories in namespace: {len(all_memories or [])}")
+            logger.debug(f"[RECALL DEBUG] Total memories in namespace: {len(all_memories or [])}")
             if all_memories:
-                logger.info(f"[RECALL DEBUG] Sample memories: {[m.get('memory', '')[:50] for m in all_memories[:3]]}")
+                logger.debug(f"[RECALL DEBUG] Sample memories: {[m.get('memory', '')[:50] for m in all_memories[:3]]}")
         except Exception as e:
-            logger.error(f"[RECALL DEBUG] List all failed: {e}")
+            logger.warning(f"[RECALL DEBUG] List all failed: {e}")
         
         # Deduplicate results
         unique_memories = {}
@@ -3275,8 +3013,7 @@ def create_graph():
             change_flight_booking_tool,
             cancel_flight_booking_tool,
             cancel_hotel_booking_tool,
-            update_hotel_booking_tool,
-            pay_later_tool,
+            update_hotel_booking_tool,            
             flight_payment_sequence_tool,
             hotel_payment_sequence_tool,
             list_loyalty_programmes_tool,
