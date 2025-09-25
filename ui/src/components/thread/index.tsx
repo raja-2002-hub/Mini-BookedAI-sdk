@@ -93,7 +93,7 @@ export function Thread() {
   );
   const [hideToolCalls, setHideToolCalls] = useQueryState(
     "hideToolCalls",
-    parseAsBoolean.withDefault(false)
+    parseAsBoolean.withDefault(true)
   );
   const [input, setInput] = useState("");
   const {
@@ -166,6 +166,10 @@ export function Thread() {
       ] as Message["content"],
     };
 
+    // Clear input and content blocks immediately
+    setInput("");
+    setContentBlocks([]);
+
     const toolMessages = ensureToolCallsHaveResponses(stream.messages);
     const context = Object.keys(artifactContext).length > 0 ? artifactContext : undefined;
     const effectiveUserId = isLoaded && isSignedIn && userId ? userId : "guest";
@@ -196,9 +200,6 @@ export function Thread() {
       console.error("Thread: Error submitting message:", error);
       toast.error("Failed to submit message. Please try again.");
     }
-
-    setInput("");
-    setContentBlocks([]);
   };
 
   const handleRegenerate = (parentCheckpoint: Checkpoint | null | undefined) => {
@@ -219,7 +220,7 @@ export function Thread() {
     <div className="flex h-screen w-full overflow-hidden">
       <div className="relative hidden lg:flex">
         <motion.div
-          className="absolute z-20 h-full overflow-hidden border-r bg-white"
+          className="absolute z-20 h-full overflow-hidden border-r bg-background"
           style={{ width: 300 }}
           animate={isLargeScreen ? { x: chatHistoryOpen ? 0 : -300 } : { x: chatHistoryOpen ? 0 : -300 }}
           initial={{ x: -300 }}
@@ -246,7 +247,6 @@ export function Thread() {
               <div>
                 {(!chatHistoryOpen || !isLargeScreen) && (
                   <Button
-                    className="hover:bg-gray-100"
                     variant="ghost"
                     onClick={() => setChatHistoryOpen((p) => !p)}
                   >
@@ -266,7 +266,6 @@ export function Thread() {
                 <div className="absolute left-0 z-10">
                   {(!chatHistoryOpen || !isLargeScreen) && (
                     <Button
-                      className="hover:bg-gray-100"
                       variant="ghost"
                       onClick={() => setChatHistoryOpen((p) => !p)}
                     >
@@ -275,7 +274,7 @@ export function Thread() {
                   )}
                 </div>
                 <motion.button
-                  className="flex cursor-pointer items-center gap-2"
+                  className="flex cursor-pointer items-center gap-2 hover:bg-accent rounded-md p-1"
                   onClick={() => setThreadId(null)}
                   animate={{ marginLeft: !chatHistoryOpen ? 48 : 0 }}
                   transition={{ type: "spring", stiffness: 300, damping: 30 }}
@@ -371,7 +370,7 @@ export function Thread() {
                         className="field-sizing-content resize-none border-none bg-transparent p-3.5 pb-0 shadow-none ring-0 outline-none focus:ring-0 focus:outline-none"
                       />
                       <div className="flex items-center gap-6 p-2 pt-4">
-                        <div>
+                        {/* <div>
                           <div className="flex items-center space-x-2">
                             <Switch
                               id="render-tool-calls"
@@ -382,7 +381,7 @@ export function Thread() {
                               Hide Tool Calls
                             </Label>
                           </div>
-                        </div>
+                        </div> */}
                         <Label htmlFor="file-input" className="flex cursor-pointer items-center gap-2">
                           <Plus className="size-5 text-gray-600" />
                           <span className="text-sm text-gray-600">Upload PDF or Image</span>
@@ -403,7 +402,8 @@ export function Thread() {
                         ) : (
                           <Button
                             type="submit"
-                            className="ml-auto shadow-md transition-all"
+                            className="ml-auto shadow-md transition-all dark:text-white"
+                            style={{ backgroundColor: '#1d1765' }}
                             disabled={isLoading || (!input.trim() && contentBlocks.length === 0)}
                           >
                             Send

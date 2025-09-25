@@ -1,5 +1,5 @@
 """
-LangGraph Agent for BookedAI
+LangGraph Agent for Booked AI
 """
 from typing import Annotated, List, Dict, Any, Sequence, Optional, Deque
 from typing_extensions import TypedDict

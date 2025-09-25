@@ -13,8 +13,8 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Booked.AI",
-  description: "Booked.AI - AI-Powered Booking Assistant",
+  title: "Booked AI",
+  description: "Booked AI - AI-Powered Booking Assistant",
 };
 
 export default function RootLayout({

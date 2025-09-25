@@ -13,7 +13,7 @@ export function BookedLogoSVG({
       alt="Booked.AI Logo"
       width={0}
       height={height}
-      className={`w-auto ${className || ''}`}
+      className={`w-auto dark:brightness-0 dark:invert ${className || ''}`}
       style={{ 
         height: `${height}px`,
         imageRendering: 'crisp-edges'
