@@ -22,52 +22,43 @@ function AppContent() {
 }
 
 export default function CatchAllPage(): React.ReactNode {
-  const { isSignedIn, isLoaded, sessionId } = useAuth();
-  const { user } = useUser();
+  const { isSignedIn, isLoaded } = useAuth();
   const [showGuestMode, setShowGuestMode] = React.useState(false);
+  const [isMounted, setIsMounted] = React.useState(false);
   const router = useRouter();
 
-  // Check authentication state and guest mode with session sync delay
+  // Handle hydration
   React.useEffect(() => {
-    // Delay to ensure Clerk session sync
-    const timer = setTimeout(() => {
-      console.log('Auth Debug:', {
-        isLoaded,
-        isSignedIn,
-        sessionId,
-        user: user
-          ? {
-              id: user.id,
-              firstName: user.firstName,
-              emailAddresses: user.emailAddresses.map(email => email.emailAddress),
-              externalAccounts: user.externalAccounts.map(account => ({
-                provider: account.provider,
-                emailAddress: account.emailAddress,
-              })),
-            }
-          : null,
-        showGuestMode,
-        guestModeFromStorage: sessionStorage.getItem('guestMode'),
-      });
+    setIsMounted(true);
+  }, []);
 
-      if (isLoaded) {
-        if (isSignedIn) {
-          sessionStorage.removeItem('guestMode');
-          setShowGuestMode(false);
-        } else {
-          const guestMode = sessionStorage.getItem('guestMode') === 'true';
-          setShowGuestMode(guestMode);
-          if (!guestMode) {
-            router.push('/sign-in');
-          }
+  // Check authentication state and guest mode
+  React.useEffect(() => {
+    if (!isMounted || !isLoaded) return;
+
+    if (isSignedIn) {
+      if (typeof window !== 'undefined') {
+        sessionStorage.removeItem('guestMode');
+      }
+      setShowGuestMode(false);
+    } else {
+      const guestMode = typeof window !== 'undefined' ? sessionStorage.getItem('guestMode') === 'true' : false;
+      setShowGuestMode(guestMode);
+      
+      // Only redirect to sign-in if not in guest mode and no URL params (not from OAuth)
+      if (!guestMode && typeof window !== 'undefined') {
+        const urlParams = new URLSearchParams(window.location.search);
+        const hasUrlParams = urlParams.toString().length > 0;
+        
+        if (!hasUrlParams) {
+          router.push('/sign-in');
         }
       }
-    }, 500); // Wait 0.5s for session sync
+    }
+  }, [isLoaded, isSignedIn, router, isMounted]);
 
-    return () => clearTimeout(timer);
-  }, [isLoaded, isSignedIn, user, sessionId, router]);
-
-  if (!isLoaded) {
+  // Show loading state during hydration
+  if (!isLoaded || !isMounted) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
