@@ -9,7 +9,7 @@ function SignUpSSOCallbackContent() {
   const searchParams = useSearchParams();
   const clerk = useClerk();
   const { isSignedIn, sessionId } = useAuth();
-  const [isProcessing, setIsProcessing] = useState(true);
+  const [_isProcessing, setIsProcessing] = useState(true);
 
 
 
