@@ -10,6 +10,7 @@ import {
   useState,
   Dispatch,
   SetStateAction,
+  useMemo,
 } from "react";
 import { createClient } from "./client";
 import { useAuth } from "@clerk/nextjs";
@@ -82,13 +83,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     }
   }, [apiUrl, assistantId, userId]);
 
-  const value = {
+  const value = useMemo(() => ({
     getThreads,
     threads,
     setThreads,
     threadsLoading,
     setThreadsLoading,
-  };
+  }), [getThreads, threads, setThreads, threadsLoading, setThreadsLoading]);
 
   return <ThreadContext.Provider value={value}>{children}</ThreadContext.Provider>;
 }
