@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useClerk, useAuth } from '@clerk/nextjs';
 
-export default function SignUpSSOCallback() {
+function SignUpSSOCallbackContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const clerk = useClerk();
@@ -90,5 +90,20 @@ export default function SignUpSSOCallback() {
         <p>Processing sign-up authentication...</p>
       </div>
     </div>
+  );
+}
+
+export default function SignUpSSOCallback() {
+  return (
+    <Suspense fallback={
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p>Processing sign-up authentication...</p>
+        </div>
+      </div>
+    }>
+      <SignUpSSOCallbackContent />
+    </Suspense>
   );
 }
