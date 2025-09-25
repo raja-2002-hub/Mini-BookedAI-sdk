@@ -12,6 +12,7 @@ function SignUpSSOCallbackContent() {
   const [isProcessing, setIsProcessing] = useState(true);
 
 
+
   useEffect(() => {
     async function handleCallback() {
 

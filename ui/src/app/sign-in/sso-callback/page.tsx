@@ -12,6 +12,7 @@ function SSOCallbackContent() {
   const [isProcessing, setIsProcessing] = useState(true);
 
 
+
   useEffect(() => {
     async function handleCallback() {
 
@@ -51,12 +52,13 @@ function SSOCallbackContent() {
         console.error('OAuth callback error:', error);
         
         // Handle specific error cases
-        if (error.code === 'external_account_not_found' || error.message?.includes('External Account was not found') || error.message?.includes('There is no account to transfer')) {
-          console.log('External account not found - proceeding with new user');
+        if (error.code === 'external_account_not_found' || error.message?.includes('External Account was not found') || error.message?.includes('There is no account to transfer') || error.message?.includes('The External Account was not found')) {
+          console.log('External account not found - redirecting to sign-up callback');
           // Keep loading longer to prevent showing error page
           setTimeout(() => {
             setIsProcessing(false);
-            router.push('/');
+            // Redirect to sign-up callback for new user creation
+            router.push('/sign-up/sso-callback');
           }, 2000);
         } else if (error.message?.includes('Unable to complete action')) {
           console.log('Clerk service error - redirecting to home');
