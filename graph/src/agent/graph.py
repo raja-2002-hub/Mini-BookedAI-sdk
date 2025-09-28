@@ -896,18 +896,17 @@ async def flight_payment_sequence_tool(
     Complete FLIGHT booking payment sequence.
     Use this tool ONLY for FLIGHT bookings.
     
-    IMPORTANT: Before calling this tool, collect ALL required information:
-    - Passenger details (name, birth date, email, phone)
-    - Payment method (card details, balance, etc.) 
-    - Seat selection preference (yes/no)    
+    IMPORTANT: Collect passenger details (name, birth date, email, phone) first.
+    Payment information should only be requested after passenger details are confirmed. 
     
     Args:
         offer_id: The flight offer ID (off_...)
         passengers: List of passenger details (must include given_name,born_on and family_name)
         email: Contact email
-        payment_method: Payment information (card details, balance, etc.)
         phone_number: Contact phone number
         include_seat_map: If True, retrieve seat map before booking
+        payment_method: Payment information (card details, balance, etc.), optional initially
+                        and requested only after passenger details are validated        
     
     Returns:
         JSON string with booking confirmation or error
@@ -917,11 +916,50 @@ async def flight_payment_sequence_tool(
     logger.info(quote_data)
     amount = quote_data.get("data", {}).get("total_amount")
     currency = quote_data.get("data", {}).get("total_currency")
+    outbound_slice = quote_data.get("data", {}).get("slices", [])[0] if quote_data.get("data", {}).get("slices") else {}
+    return_slice = quote_data.get("data", {}).get("slices", [])[1] if len(quote_data.get("data", {}).get("slices", [])) > 1 else {}
     if not passengers or not all(['given_name' in g and 'family_name' in g and 'born_on' in g for g in passengers]):
         return json.dumps({
             "status": "need_guest_info",
-            "message": "Please provide complete guest details (given_name and family_name)"
+            "message": "Please provide complete guest details (given_name, family_name,born_on)"
         })
+    
+    metadata_info = {
+        "passengers": passengers,
+        "email": email,
+        "phone_number": phone_number,
+        "offer_id": offer_id,
+
+        # Airline info
+        "airline": quote_data["data"]["owner"]["name"],
+        "airline_code": quote_data["data"]["owner"]["iata_code"],
+        "airline_logo": quote_data["data"]["owner"]["logo_symbol_url"],
+
+        # Pricing
+        "price": amount,
+        "currency": currency,
+    }
+
+    if outbound_slice:
+        metadata_info["outbound"] = {
+            "origin_city": outbound_slice["segments"][0]["origin"]["city_name"],
+            "destination_city": outbound_slice["segments"][-1]["destination"]["city_name"],
+            "departure_time": outbound_slice["segments"][0]["departing_at"],
+            "arrival_time": outbound_slice["segments"][-1]["arriving_at"],
+            "fare_brand": outbound_slice.get("fare_brand_name"),
+            "cabin": outbound_slice["segments"][0]["passengers"][0]["cabin_class_marketing_name"],
+        }
+
+    if return_slice:
+        metadata_info["return"] = {
+            "origin_city": return_slice["segments"][0]["origin"]["city_name"],
+            "destination_city": return_slice["segments"][-1]["destination"]["city_name"],
+            "departure_time": return_slice["segments"][0]["departing_at"],
+            "arrival_time": return_slice["segments"][-1]["arriving_at"],
+            "fare_brand": return_slice.get("fare_brand_name"),
+            "cabin": return_slice["segments"][0]["passengers"][0]["cabin_class_marketing_name"],
+        }
+
     
     # Step 1: Get seat map if requested
     if include_seat_map and not kwargs.get("selected_seats"):
@@ -979,12 +1017,7 @@ async def flight_payment_sequence_tool(
                     }
                 ]
             },
-            "metadata": {
-                "guests": passengers,
-                "email": email,
-                "phone_number": phone_number,
-                "offer_id": offer_id
-            }
+            "metadata": metadata_info
         })
     
     # STEP 3 — Process payment
@@ -1059,18 +1092,19 @@ async def hotel_payment_sequence_tool(
     """
     Complete HOTEL booking payment sequence.
     Use this tool ONLY for HOTEL bookings.
-    
-    IMPORTANT: Before calling this tool, collect ALL required information:
-    - Guest details (name, email, phone)
-    - Payment method (card details, balance, etc.)
+
+    IMPORTANT: Collect guest details (name, email, phone) first.
+    Payment information should only be requested after guest details are confirmed. 
     
     Args:
         rate_id: The hotel rate ID (rat_...)
         guests: List of guest details (must include given_name and family_name)
         email: Contact email
-        payment_method: Payment information (card details, balance, etc.)
         phone_number: Contact phone number
         stay_special_requests: Special requests for the stay
+        payment_method: Payment information (card details, balance, etc.), optional initially
+                        and requested only after guest details are validated        
+    
     
     Returns:
         JSON string with booking confirmation or error
@@ -1134,7 +1168,11 @@ async def hotel_payment_sequence_tool(
                 "guests": guests,
                 "email": email,
                 "phone_number": phone_number,
-                "stay_special_requests": stay_special_requests               
+                "stay_special_requests": stay_special_requests,
+                "hotel_name": quote_data["data"]["accommodation"]["name"],
+                "room_type": quote_data["data"]["accommodation"]["rooms"][0]["name"],
+                "check_in": quote_data["data"]["check_in_date"],
+                "check_out": quote_data["data"]["check_out_date"]               
             }
         })
     
@@ -1639,10 +1677,10 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
     """Main agent reasoning node."""
 
     logger.info("Agent node started - processing conversation state")
-    logger.debug(f"[AGENT FLOW] Current messages: {[msg.type for msg in state['messages']]}")
-    logger.debug(f"[INIT] Available UI mappings: {TOOL_UI_MAPPING}")
-    logger.debug(f"[INIT] State keys: {list(state.keys())}")
-    logger.debug(f"[INIT] UI enabled setting: {state.get('ui_enabled', 'not_set')}")    
+    # logger.debug(f"[AGENT FLOW] Current messages: {[msg.type for msg in state['messages']]}")
+    # logger.debug(f"[INIT] Available UI mappings: {TOOL_UI_MAPPING}")
+    # logger.debug(f"[INIT] State keys: {list(state.keys())}")
+    # logger.debug(f"[INIT] UI enabled setting: {state.get('ui_enabled', 'not_set')}")    
 
     llm = create_llm()
     tools = [
@@ -1717,7 +1755,7 @@ Only discuss travel related topics.
     ui_enabled_for_preview = state.get("ui_enabled", True)
     
     if ui_enabled_for_preview:
-        logger.debug(f"[UI PREVIEW] Scanning {len(state['messages'])} messages for potential UI components")
+        # logger.debug(f"[UI PREVIEW] Scanning {len(state['messages'])} messages for potential UI components")
         # Look for recent tool messages that would generate UI
         for i in range(len(state["messages"]) - 1, -1, -1):
             msg = state["messages"][i]
@@ -1770,14 +1808,14 @@ Since rich UI components (hotel cards, flight results, etc.) will be displayed t
     response = llm_with_tools.invoke(messages)
 
     ui_enabled = state.get("ui_enabled", True)
-    
+
     # Handle push UI message with improved logic for multiple tool calls
     if ui_enabled:
-        
+
         # Find all recent tool messages that could need UI components
         # Look for tool messages that came after the last human/AI message
         recent_tool_messages = []
-        
+
         # Work backwards from the end to find recent tool calls in this turn
         for i in range(len(state["messages"]) - 1, -1, -1):
             msg = state["messages"][i]
@@ -1786,17 +1824,17 @@ Since rich UI components (hotel cards, flight results, etc.) will be displayed t
             elif msg.type in ["human", "ai"]:
                 # Stop when we hit a non-tool message (start of this tool sequence)
                 break
-        
+
         # Process each tool message for potential UI
         ui_components_created = 0
         for idx, tool_message in enumerate(recent_tool_messages):
             try:
                 # Parse tool result data
                 tool_data = json.loads(tool_message.content)
-                
+
                 # Use decision function to determine if UI should be pushed
                 should_push, ui_type = should_push_ui_message(tool_message, tool_data)
-                
+
                 if should_push and ui_type:
                     # Attempt the actual UI push
                     try:
@@ -1804,12 +1842,12 @@ Since rich UI components (hotel cards, flight results, etc.) will be displayed t
                         ui_components_created += 1
                     except Exception as push_error:
                         logger.error(f"[UI PROCESSING] ✗ Failed to push UI component for {tool_message.name}: {push_error}", exc_info=True)
-                    
+
             except json.JSONDecodeError as e:
                 logger.warning(f"[UI PROCESSING] ✗ Failed to parse tool result as JSON for UI from {tool_message.name}: {e}")
             except Exception as e:
                 logger.error(f"[UI PROCESSING] ✗ Unexpected error processing UI message for {tool_message.name}: {e}", exc_info=True)
-        
+
         if ui_components_created > 0:
             logger.debug(f"[UI PROCESSING] ✓ Created {ui_components_created} UI components")
         else:
@@ -1979,7 +2017,6 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
             import contextvars
             # Try to get the current request context
             request_context = contextvars.copy_context()
-            logger.info(f"🔍 [AUTH DEBUG] Request context: {request_context}")
             
             # Try to get user_id from the request context
             # The API passthrough should be forwarding it as a header
@@ -2055,18 +2092,15 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
     # Log comprehensive user info
     user_display = user_email or user_metadata.get("username") or user_id
     logger.debug(f"👤 [CONTEXT PREP] Using user: {user_display} (ID: {user_id})")
-    logger.debug(f"👤 [CONTEXT PREP] User metadata: {user_metadata}")
     
     out_messages = []
     
     # Process user input and extract entities
     if user_input:
-        logger.debug(f"Processing user input: {user_input}")
         
         # Extract entities from user input
         try:
             entities = await extract_entities(user_input)
-            logger.debug(f"Extracted entities: {entities}")
             # Keep entity extraction silent
         except Exception as e:
             logger.warning(f"Entity extraction failed: {e}")
@@ -2117,10 +2151,10 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
             if all_memories and all_memories != "No memories found":
                 memory_count = len(all_memories.split('\n')) if '\n' in all_memories else 1
                 # Only show if user has more than 5 memories (needs management)
-                if memory_count > 5:
-                    out_messages.append(SystemMessage(content=f"📋 User has {memory_count} memories - consider using memory management tools"))
-            else:
-                out_messages.append(SystemMessage(content=f"📋 User has no memories yet"))
+                # if memory_count > 5:
+                #     out_messages.append(SystemMessage(content=f"📋 User has {memory_count} memories - consider using memory management tools"))
+            # else:
+            #     out_messages.append(SystemMessage(content=f"📋 User has no memories yet"))
         except Exception as e:
             logger.warning(f"Memory listing failed: {e}")
         
@@ -2557,7 +2591,7 @@ async def recall_tool(query: str, top_k: int = 6) -> str:
                 unique_memories[memory_id] = memory
         
         memories = list(unique_memories.values())
-        logger.info(f"[RECALL DEBUG] Final deduplicated results: {len(memories)}")
+        # logger.info(f"[RECALL DEBUG] Final deduplicated results: {len(memories)}")
         
         if memories:
             # Extract memory content
