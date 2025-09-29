@@ -24,10 +24,62 @@ const isValidCardNumber = (cardNumber) => {
 
 // Hotel search result component
 const HotelResultCard = ({ hotels }) => {
+  const stream = useStreamContext();
+
   // Add null check and early return
   if (!hotels || !Array.isArray(hotels) || hotels.length === 0) {
     return null;
   }
+
+  // Handle hotel card click to submit hotel selection
+const handleHotelSelect = async (hotel, index) => {
+  if (!stream) {
+    console.error('Stream context not available');
+    return;
+  }
+
+  try {
+    const safeHotel = {
+      name: hotel?.name || 'Hotel Name',
+      location: hotel?.location || 'Location',
+      rating: hotel?.rating || '0.0',
+      price: hotel?.price || 'Price N/A',
+      image: hotel?.image || 'https://via.placeholder.com/300x400?text=Hotel+Image',
+      amenities: hotel?.amenities || []
+    };
+
+    const hotelMessage = {
+      id: uuidv4(),
+      type: "human",
+      content: `
+Selected Hotel:
+Hotel Name: ${safeHotel.name}
+Location: ${safeHotel.location}
+Rating: ${safeHotel.rating} stars
+Price: ${safeHotel.price}
+${safeHotel.amenities.length > 0 ? `Amenities: ${safeHotel.amenities.join(', ')}` : ''}
+      `.trim()
+    };
+
+    await stream.submit(
+      {
+        threadId: stream.threadId,
+        messages: [hotelMessage]
+      },
+      {
+        streamMode: ["values"],
+        optimisticValues: (prev) => ({
+          ...prev,
+          messages: [...(prev.messages ?? []), hotelMessage]
+        })
+      }
+    );
+
+  } catch (error) {
+    console.error('Hotel selection error:', error);
+    alert(error instanceof Error ? error.message : "An error occurred while selecting the hotel");
+  }
+};
 
   // Inline styles for scoped Tailwind CSS with adjusted text proportions
   const scopedStyles = `
@@ -97,7 +149,8 @@ const HotelResultCard = ({ hotels }) => {
             return (
               <div key={`hotel-${index}`} className="w-full"> 
                 <div 
-                  className="relative w-full aspect-[3/4] rounded-xl overflow-hidden shadow-lg"
+                  className="relative w-full aspect-[3/4] rounded-xl overflow-hidden shadow-lg cursor-pointer transition-all duration-300 hover:shadow-xl hover:scale-105"
+                  onClick={() => handleHotelSelect(hotel, index)}
                   style={{ 
                     backgroundImage: `url(${safeHotel.image})`, 
                     backgroundSize: 'cover', 
@@ -136,67 +189,569 @@ const HotelResultCard = ({ hotels }) => {
   );
 };  
 
-// Flight search result component  
-const FlightResultCard = (props: {
-  flights: Array<{
-    airline: string;
-    departure: string;
-    arrival: string;
-    duration: string;
-    price: string;
-    stops: number;
-  }>;
-}) => {
-  // Add null/undefined checks
+// Flight search result component 
+const FlightResultCard = (props) => {
+
+  const stream = useStreamContext();
+  
   if (!props.flights || !Array.isArray(props.flights) || props.flights.length === 0) {
     return null;
   }
 
-  return (
-    <div className="space-y-3">
-      {props.flights.map((flight, index) => {
-        // Add safety checks for flight properties
-        const safeFlight = {
-          airline: flight?.airline || 'Unknown Airline',
-          departure: flight?.departure || '--:--',
-          arrival: flight?.arrival || '--:--',
-          duration: flight?.duration || 'N/A',
-          price: flight?.price || 'Price N/A',
-          stops: flight?.stops ?? 0
-        };
+  const parseTime = (isoString) => {
+    if (!isoString) return '--:--';
+    try {
+      const date = new Date(isoString);
+      return date.toLocaleTimeString(undefined, { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: false 
+      });
+    } catch {
+      return '--:--';
+    }
+  };
 
-        return (
-          <div key={`flight-${index}`} className="border rounded-lg p-4 bg-white shadow-sm">
-            <div className="flex justify-between items-center">
-              <div className="flex-1">
-                <div className="font-semibold">{safeFlight.airline}</div>
-                <div className="flex items-center gap-4 mt-2">
-                  <span className="text-lg font-mono">{safeFlight.departure}</span>
-                  <span className="text-gray-400">→</span>
-                  <span className="text-lg font-mono">{safeFlight.arrival}</span>
-                  <span className="text-sm text-gray-600">({safeFlight.duration})</span>
-                  {safeFlight.stops === 0 ? (
-                    <span className="px-2 py-1 bg-green-100 text-green-800 text-xs rounded">
-                      Non-stop
-                    </span>
-                  ) : (
-                    <span className="px-2 py-1 bg-yellow-100 text-yellow-800 text-xs rounded">
-                      {safeFlight.stops} stop{safeFlight.stops > 1 ? 's' : ''}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <div className="text-right">
-                <div className="text-2xl font-bold text-blue-600">{safeFlight.price}</div>
-                <button className="mt-2 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
-                  Select
-                </button>
-              </div>
-            </div>
+  const parseDate = (isoString) => {
+    if (!isoString) return '';
+    try {
+      const date = new Date(isoString);
+      return date.toLocaleDateString('en-US', { 
+        weekday: 'short',
+        day: 'numeric',
+        month: 'short'
+      });
+    } catch {
+      return '';
+    }
+  };
+
+  const calculateStops = (slices) => {
+    if (!slices || !Array.isArray(slices) || slices.length === 0) return 0;
+    const firstSlice = slices[0];
+    if (!firstSlice || !firstSlice.segments) return 0;
+    return Math.max(0, firstSlice.segments.length - 1);
+  };
+
+  const handleFlightSelect = async (flight, index) => {
+    if (!stream) {
+      console.error('Stream context not available');
+      return;
+    }
+
+    try {
+      const isReturnFlight = flight.slices && flight.slices.length > 1;
+      
+      let content = '';
+      
+      if (isReturnFlight) {
+        // Return flight
+        const outboundSlice = flight.slices[0];
+        const returnSlice = flight.slices[1];
+        
+        const outboundFirstSeg = outboundSlice?.segments?.[0];
+        const outboundLastSeg = outboundSlice?.segments?.[outboundSlice.segments.length - 1];
+        const returnFirstSeg = returnSlice?.segments?.[0];
+        const returnLastSeg = returnSlice?.segments?.[returnSlice.segments.length - 1];
+        
+        const outboundStops = Math.max(0, (outboundSlice?.segments?.length || 1) - 1);
+        const returnStops = Math.max(0, (returnSlice?.segments?.length || 1) - 1);
+        
+        content = `
+Selected Return Flight:
+Offer ID: ${flight.offer_id || 'N/A'}
+Airline: ${flight.airline || 'Unknown Airline'}
+Total Price: ${flight.price || 'Price N/A'}
+
+Outbound Journey:
+Route: ${outboundFirstSeg?.origin || ''} → ${outboundLastSeg?.destination || ''}
+Departure: ${parseDate(outboundFirstSeg?.departure_time)} at ${parseTime(outboundFirstSeg?.departure_time)}
+Arrival: ${parseDate(outboundLastSeg?.arrival_time)} at ${parseTime(outboundLastSeg?.arrival_time)}
+Duration: ${outboundSlice?.duration || 'N/A'}
+Stops: ${outboundStops === 0 ? 'Non-stop' : outboundStops === 1 ? '1 Stop' : `${outboundStops} Stops`}
+
+Return Journey:
+Route: ${returnFirstSeg?.origin || ''} → ${returnLastSeg?.destination || ''}
+Departure: ${parseDate(returnFirstSeg?.departure_time)} at ${parseTime(returnFirstSeg?.departure_time)}
+Arrival: ${parseDate(returnLastSeg?.arrival_time)} at ${parseTime(returnLastSeg?.arrival_time)}
+Duration: ${returnSlice?.duration || 'N/A'}
+Stops: ${returnStops === 0 ? 'Non-stop' : returnStops === 1 ? '1 Stop' : `${returnStops} Stops`}
+        `.trim();
+      } else {
+        // One-way flight
+        const firstSlice = flight.slices?.[0];
+        const firstSegment = firstSlice?.segments?.[0];
+        const lastSegment = firstSlice?.segments?.[firstSlice.segments.length - 1];
+        
+        const departure = firstSegment ? parseTime(firstSegment.departure_time) : '--:--';
+        const arrival = lastSegment ? parseTime(lastSegment.arrival_time) : '--:--';
+        const duration = firstSlice?.duration || 'N/A';
+        const stops = calculateStops(flight.slices);
+
+        content = `
+Selected Flight:
+Offer ID: ${flight.offer_id || 'N/A'}
+Airline: ${flight.airline || 'Unknown Airline'}
+Route: ${firstSegment?.origin || ''} → ${lastSegment?.destination || ''}
+Departure: ${departure}
+Arrival: ${arrival}
+Duration: ${duration}
+Stops: ${stops === 0 ? 'Non-stop' : stops === 1 ? '1 Stop' : `${stops} Stops`}
+Price: ${flight.price || 'Price N/A'}
+        `.trim();
+      }
+
+      const flightMessage = {
+        id: uuidv4(),
+        type: "human",
+        content: content
+      };
+
+      await stream.submit(
+        {
+          threadId: stream.threadId,
+          messages: [flightMessage]
+        },
+        {
+          streamMode: ["values"],
+          optimisticValues: (prev) => ({
+            ...prev,
+            messages: [...(prev.messages ?? []), flightMessage]
+          })
+        }
+      );
+
+    } catch (error) {
+      console.error('Flight selection error:', error);
+      alert(error instanceof Error ? error.message : "An error occurred while selecting the flight");
+    }
+  };
+
+  const renderJourneySection = (slice, label, airline) => {
+    if (!slice) return null;
+    
+    const firstSegment = slice.segments?.[0];
+    const lastSegment = slice.segments?.[slice.segments.length - 1];
+    
+    const departure = firstSegment ? parseTime(firstSegment.departure_time) : '--:--';
+    const arrival = lastSegment ? parseTime(lastSegment.arrival_time) : '--:--';
+    const departureDate = firstSegment ? parseDate(firstSegment.departure_time) : '';
+    const arrivalDate = lastSegment ? parseDate(lastSegment.arrival_time) : '';
+    const duration = slice.duration || 'N/A';
+    const stops = Math.max(0, (slice.segments?.length || 1) - 1);
+    const originCity = firstSegment?.origin_city || '';
+    const destinationCity = lastSegment?.destination_city || '';
+    const originCode = firstSegment?.origin || '';
+    const destinationCode = lastSegment?.destination || '';
+
+    // Build stops details
+    const stopsDetails: string[] = [];
+    if (stops > 0 && slice.segments) {
+      for (let i = 0; i < slice.segments.length - 1; i++) {
+        const segment = slice.segments[i];
+        const nextSegment = slice.segments[i + 1];
+        if (segment && nextSegment) {
+          const stopCode = segment.destination;
+          const stopCity = segment.destination_city;
+          stopsDetails.push(`${stopCode} ${stopCity || ''}`);
+        }
+      }
+    }
+
+    return (
+      <div className="journey-section">
+        <div className="journey-header">
+          <div className="journey-label">{label}: {departureDate}</div>
+          <div className="journey-airline">{airline}</div>
+        </div>
+        
+        {/* Route Section */}
+        <div className="route-section">
+          {/* Origin */}
+          <div className="airport-info">
+            <div className="airport-code">{originCode}</div>
+            <div className="airport-name">{originCity}</div>
+            <div className="flight-date">{departureDate}</div>
+            <div className="flight-time">{departure}</div>
           </div>
-        );
-      })}
-    </div>
+
+          {/* Duration */}
+          <div className="duration-section">
+            <div className="duration-badge">{duration}</div>
+          </div>
+
+          {/* Destination */}
+          <div className="airport-info" style={{ textAlign: 'right' }}>
+            <div className="airport-code">{destinationCode}</div>
+            <div className="airport-name">{destinationCity}</div>
+            <div className="flight-date">{arrivalDate}</div>
+            <div className="flight-time">{arrival}</div>
+          </div>
+        </div>
+
+        {/* Stops Info */}
+        {stops > 0 && (
+          <div className="stops-info">
+            <div className="stops-detail">
+              {stops} stop{stops > 1 ? 's' : ''}
+            </div>
+            {stopsDetails.map((stop, idx) => (
+              <div key={idx} className="stops-detail">{stop}</div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const scopedStyles = `
+    #flight-cards-scope { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: #1f2937;
+    }
+    #flight-cards-scope .grid { display: grid; }
+    #flight-cards-scope .grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+    #flight-cards-scope .sm\\:grid-cols-2 { @media (min-width: 640px) { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    #flight-cards-scope .md\\:grid-cols-3 { @media (min-width: 768px) { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    #flight-cards-scope .lg\\:grid-cols-4 { @media (min-width: 1024px) { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+    #flight-cards-scope .xl\\:grid-cols-5 { @media (min-width: 1280px) { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+    #flight-cards-scope .gap-4 { gap: 1rem; }
+    #flight-cards-scope .return-flight-wrapper {
+      grid-column: 1 / -1;
+    }
+    @media (min-width: 768px) {
+      #flight-cards-scope .return-flight-wrapper {
+        grid-column: span 2;
+      }
+    }
+    @media (min-width: 1024px) {
+      #flight-cards-scope .return-flight-wrapper {
+        grid-column: span 3;
+      }
+    }
+    #flight-cards-scope .flight-card {
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 16px;
+      transition: all 0.2s ease;
+      cursor: pointer;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+    #flight-cards-scope .flight-card:hover {
+      border-color: #2196f3;
+      box-shadow: 0 4px 12px rgba(33, 150, 243, 0.15);
+    }
+    #flight-cards-scope .return-flight-card {
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 16px;
+      transition: all 0.2s ease;
+      cursor: pointer;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+    #flight-cards-scope .return-flight-card:hover {
+      border-color: #2196f3;
+      box-shadow: 0 4px 12px rgba(33, 150, 243, 0.15);
+    }
+    #flight-cards-scope .journey-container {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+    @media (min-width: 768px) {
+      #flight-cards-scope .journey-container {
+        flex-direction: row;
+        gap: 0;
+      }
+    }
+    #flight-cards-scope .journey-section {
+      flex: 1;
+      min-width: 0;
+      padding: 16px;
+    }
+    #flight-cards-scope .journey-section:first-child {
+      padding-right: 20px;
+    }
+    #flight-cards-scope .journey-section:last-child {
+      padding-left: 20px;
+    }
+    @media (max-width: 767px) {
+      #flight-cards-scope .journey-section:first-child {
+        padding-right: 16px;
+        padding-bottom: 12px;
+      }
+      #flight-cards-scope .journey-section:last-child {
+        padding-left: 16px;
+        padding-top: 12px;
+      }
+    }
+    #flight-cards-scope .journey-divider {
+      display: none;
+    }
+    @media (min-width: 768px) {
+      #flight-cards-scope .journey-divider {
+        display: block;
+        width: 1px;
+        background: #e5e7eb;
+        align-self: stretch;
+      }
+    }
+    @media (max-width: 767px) {
+      #flight-cards-scope .journey-divider {
+        display: block;
+        height: 1px;
+        background: #e5e7eb;
+        margin: 0;
+      }
+    }
+    #flight-cards-scope .journey-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: #1f2937;
+      margin-bottom: 12px;
+      letter-spacing: 0;
+    }
+    #flight-cards-scope .journey-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    #flight-cards-scope .journey-airline {
+      font-size: 11px;
+      color: #6b7280;
+      font-weight: 500;
+    }
+    #flight-cards-scope .airline-logo {
+      height: 20px;
+      width: auto;
+      max-width: 100%;
+      object-fit: contain;
+      margin-bottom: 12px;
+    }
+    #flight-cards-scope .route-section {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    #flight-cards-scope .airport-info {
+      flex: 1;
+      min-width: 0;
+    }
+    #flight-cards-scope .airport-code {
+      font-size: 11px;
+      color: #6b7280;
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+    #flight-cards-scope .airport-name {
+      font-size: 11px;
+      color: #6b7280;
+      margin-bottom: 8px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #flight-cards-scope .flight-time {
+      font-size: 18px;
+      font-weight: 700;
+      color: #1f2937;
+      margin-bottom: 2px;
+    }
+    #flight-cards-scope .flight-date {
+      font-size: 11px;
+      color: #6b7280;
+      margin-top: 0;
+    }
+    #flight-cards-scope .duration-section {
+      flex: 0 0 auto;
+      text-align: center;
+      padding: 0 12px;
+      align-self: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    #flight-cards-scope .duration-badge {
+      background: transparent;
+      color: #6b7280;
+      font-size: 10px;
+      font-weight: 500;
+      padding: 0;
+      border-radius: 0;
+      display: inline-block;
+      white-space: nowrap;
+    }
+    #flight-cards-scope .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 0;
+      border-top: 1px solid #f3f4f6;
+      font-size: 10px;
+    }
+    #flight-cards-scope .info-label {
+      color: #6b7280;
+      font-weight: 500;
+    }
+    #flight-cards-scope .info-value {
+      color: #6b7280;
+      font-weight: 500;
+      text-align: right;
+    }
+    #flight-cards-scope .stops-info {
+      margin-top: 4px;
+    }
+    #flight-cards-scope .stops-detail {
+      font-size: 10px;
+      color: #6b7280;
+      font-weight: 500;
+      line-height: 1.6;
+    }
+    #flight-cards-scope .price-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-top: 8px;
+      border-top: 1px solid #f3f4f6;
+    }
+    #flight-cards-scope .price-label {
+      font-size: 10px;
+      color: #6b7280;
+      font-weight: 500;
+    }
+    #flight-cards-scope .price-value {
+      font-size: 16px;
+      font-weight: 700;
+      color: #1f2937;
+    }
+  `;
+
+  return (
+    <React.Fragment>
+      <style dangerouslySetInnerHTML={{ __html: scopedStyles }} />
+      <div id="flight-cards-scope">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+          {props.flights.map((flight, index) => {
+            const isReturnFlight = flight.slices && flight.slices.length > 1;
+            
+            if (isReturnFlight) {
+              return (
+                <div key={`flight-${index}`} className="return-flight-wrapper">
+                  <div className="return-flight-card" onClick={() => handleFlightSelect(flight, index)}>
+                    {/* Airline Logo */}
+                    <div style={{ marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      {flight.airline_logo ? (
+                        <img src={flight.airline_logo} alt={flight.airline || 'Airline'} className="airline-logo" style={{ marginBottom: '0' }} />
+                      ) : (
+                        <div className="airline-logo" style={{ fontSize: '14px', fontWeight: '600', marginBottom: '0' }}>{flight.airline || 'Unknown Airline'}</div>
+                      )}
+                    </div>
+
+                    {/* Journey Container */}
+                    <div className="journey-container">
+                      {/* Outbound Journey */}
+                      {renderJourneySection(flight.slices[0], 'Depart', flight.airline)}
+                      
+                      {/* Divider */}
+                      <div className="journey-divider"></div>
+                      
+                      {/* Return Journey */}
+                      {renderJourneySection(flight.slices[1], 'Return', flight.airline)}
+                    </div>
+
+                    {/* Price Row */}
+                    <div className="price-row" style={{ marginTop: '16px' }}>
+                      <span className="price-label">Total cost</span>
+                      <span className="price-value">{flight.price || 'Price N/A'}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            } else {
+              // One-way flight (existing code)
+              const firstSlice = flight.slices?.[0];
+              const firstSegment = firstSlice?.segments?.[0];
+              const lastSegment = firstSlice?.segments?.[firstSlice.segments.length - 1];
+              
+              const airline = flight.airline || 'Unknown Airline';
+              const airlineLogo = flight.airline_logo || null;
+              const airlineCode = flight.airline_code || '';
+              const departure = firstSegment ? parseTime(firstSegment.departure_time) : '--:--';
+              const arrival = lastSegment ? parseTime(lastSegment.arrival_time) : '--:--';
+              const departureDate = firstSegment ? parseDate(firstSegment.departure_time) : '';
+              const duration = firstSlice?.duration || 'N/A';
+              const price = flight.price || 'Price N/A';
+              const stops = calculateStops(flight.slices);
+              const originCity = firstSegment?.origin_city || '';
+              const destinationCity = lastSegment?.destination_city || '';
+              const originCode = firstSegment?.origin || '';
+              const destinationCode = lastSegment?.destination || '';
+
+              return (
+                <div key={`flight-${index}`}>
+                  <div className="flight-card" onClick={() => handleFlightSelect(flight, index)}>
+                    {/* Airline Logo */}
+                    {airlineLogo ? (
+                      <img src={airlineLogo} alt={airline} className="airline-logo" />
+                    ) : (
+                      <div className="airline-logo" style={{ fontSize: '14px', fontWeight: '600' }}>{airline}</div>
+                    )}
+
+                    {/* Route Section */}
+                    <div className="route-section">
+                      {/* Origin */}
+                      <div className="airport-info">
+                        <div className="airport-code">{originCode}</div>
+                        <div className="airport-name">{originCity}</div>
+                        <div className="flight-date">{departureDate}</div>
+                        <div className="flight-time">{departure}</div>
+                      </div>
+
+                      {/* Duration */}
+                      <div className="duration-section">
+                        <div className="duration-badge">{duration}</div>
+                      </div>
+
+                      {/* Destination */}
+                      <div className="airport-info" style={{ textAlign: 'right' }}>
+                        <div className="airport-code">{destinationCode}</div>
+                        <div className="airport-name">{destinationCity}</div>
+                        <div className="flight-date">{departureDate}</div>
+                        <div className="flight-time">{arrival}</div>
+                      </div>
+                    </div>
+
+                    {/* Stops Info */}
+                    <div className="info-row">
+                      <span className="info-label">Stops</span>
+                      <span className="info-value">{stops === 0 ? '0 stops' : `${stops} stop${stops > 1 ? 's' : ''}`}</span>
+                    </div>
+
+                    {/* Airline Code */}
+                    {airlineCode && (
+                      <div className="info-row">
+                        <span className="info-label">{airline}</span>
+                        <span className="info-value">{airlineCode}</span>
+                      </div>
+                    )}
+
+                    {/* Price */}
+                    <div className="price-row">
+                      <span className="price-label">Total cost</span>
+                      <span className="price-value">{price}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+          })}
+        </div>
+      </div>
+    </React.Fragment>
   );
 };
 

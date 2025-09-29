@@ -311,7 +311,8 @@ class FlightsEndpoint:
         formatted = []
         for offer in offers:
             airline = offer.get('owner', {}).get('name', 'N/A')
-            airline_logo = offer.get('owner', {}).get('logo_symbol_url', None)
+            airline_logo = offer.get('owner', {}).get('logo_lockup_url', None)
+            airline_code = offer.get('owner', {}).get('iata_code', 'N/A')
             price = f"{offer.get('total_amount', 'N/A')} {offer.get('total_currency', 'N/A')}"
             offer_id = offer.get('id', 'N/A')
             passenger_ids = [p.get("id") for p in offer.get("passengers", []) if p.get("id")]
@@ -385,6 +386,7 @@ class FlightsEndpoint:
             formatted.append({
                 "airline": airline,
                 "airline_logo": airline_logo,
+                "airline_code": airline_code,
                 "price": price,
                 "offer_id": offer_id,
                 "emissions": emissions,

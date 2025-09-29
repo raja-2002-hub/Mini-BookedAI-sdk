@@ -1655,11 +1655,30 @@ def should_push_ui_message(tool_message: ToolMessage, tool_data: Dict[str, Any])
         return False, None
     
     elif tool_name == "search_flights_tool":
-        logger.info(f"[UI PUSH] Flight search - using generic JSON renderer (no custom UI)")
-        if isinstance(tool_data, dict) and tool_data.get("status") in ["need_payment_info"]:
-            logger.info(f"[UI PUSH] ✓ Payment form needed")
-            return True, ui_type
-        logger.info(f"[UI PUSH] ✗ No payment form needed")
+        logger.info(f"[UI PUSH] Processing flight search results for UI")
+        # Only push UI if we have actual flight results
+        flights = tool_data.get("flights", [])
+        logger.info(f"[UI PUSH] Flights data type: {type(flights)}, length: {len(flights) if isinstance(flights, list) else 'N/A'}")
+        
+        if isinstance(flights, list) and len(flights) > 0:
+            logger.info(f"[UI PUSH] Found {len(flights)} flights, checking first flight structure")
+            # Verify flights have required fields for UI
+            first_flight = flights[0]
+            logger.debug(f"[UI PUSH] First flight keys: {list(first_flight.keys()) if isinstance(first_flight, dict) else 'not dict'}")
+            required_fields = ["airline", "price", "slices"]
+            
+            missing_fields = [field for field in required_fields if field not in first_flight]
+            if not missing_fields:
+                logger.info(f"[UI PUSH] Flight data validation passed - all required fields present: {required_fields}")
+                # Return True to send ALL flights to UI, not just the first one
+                return True, ui_type
+            else:
+                logger.warning(f"[UI PUSH] Flight data validation failed - missing fields: {missing_fields}")
+                logger.debug(f"[UI PUSH] Available fields in first flight: {list(first_flight.keys()) if isinstance(first_flight, dict) else 'not dict'}")
+        else:
+            logger.info(f"[UI PUSH] No valid flights data found - flights is not a list or is empty")
+        
+        logger.info(f"[UI PUSH] Rejecting UI push for {tool_name} - insufficient flight data")
         return False, None
     
     # For other tools, check if data is rich enough for UI

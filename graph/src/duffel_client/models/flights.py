@@ -78,6 +78,8 @@ class FlightSearchResponse(BaseModel):
                 flight_data = {
                     "offer_id": offer.get("offer_id", "Unknown"),
                     "airline": offer.get("airline", "Unknown"),
+                    "airline_logo": offer.get("airline_logo"), 
+                    "airline_code": offer.get("airline_code", "N/A"),
                     "price": offer.get("price", "Unknown"),
                     "slices": offer.get("slices", []),
                     "instant_payment": offer.get("instant_payment", "N/A"),
