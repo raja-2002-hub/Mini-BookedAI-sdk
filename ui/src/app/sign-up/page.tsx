@@ -41,9 +41,8 @@ export default function SignUpPage() {
           path="/sign-up"
           signInUrl="/sign-in"
           afterSignUpUrl="/"
-          afterSignInUrl="/sign-in/sso-callback"
+          afterSignInUrl="/"
           fallbackRedirectUrl="/"
-          forceRedirectUrl="/"
           appearance={{
             elements: {
               formButtonPrimary: 

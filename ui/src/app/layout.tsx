@@ -46,6 +46,7 @@ export default function RootLayout({
                   getResponse: function() { return ''; },
                   reset: function() {}
                 };
+                
               })();
             `,
           }}

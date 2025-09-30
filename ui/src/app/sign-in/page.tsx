@@ -13,7 +13,6 @@ export default function SignInPage() {
     window.location.href = '/';
   };
 
-
   // Handle hydration
   useEffect(() => {
     setIsMounted(true);
@@ -39,9 +38,8 @@ export default function SignInPage() {
           path="/sign-in"
           signUpUrl="/sign-up"
           afterSignInUrl="/"
-          afterSignUpUrl="/sign-up/sso-callback"
+          afterSignUpUrl="/"
           fallbackRedirectUrl="/"
-          forceRedirectUrl="/"
           appearance={{
             elements: {
               formButtonPrimary:
