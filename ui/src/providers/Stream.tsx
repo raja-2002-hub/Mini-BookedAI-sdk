@@ -113,7 +113,9 @@ const StreamSession = ({
             const cc = viaLang || viaTz;
             if (cc) setClientMeta((prev) => ({ ...prev, country: prev.country || cc }));
           }
-        } catch {}
+        } catch (fallbackErr) {
+          console.debug("Locale fallback for client country failed:", fallbackErr);
+        }
       }
     })();
   }, []);
