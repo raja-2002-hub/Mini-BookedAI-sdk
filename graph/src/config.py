@@ -30,6 +30,9 @@ class Config:
     # Request Configuration
     REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", "30"))
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
+
+    # Optional default client country (ISO-2) for phone parsing fallback
+    DEFAULT_CLIENT_COUNTRY: str = os.getenv("DEFAULT_CLIENT_COUNTRY", "")
     
     @classmethod
     def validate(cls) -> None:
