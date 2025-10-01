@@ -95,11 +95,27 @@ const StreamSession = ({
     (async () => {
       try {
         const res = await fetch("https://ipapi.co/json");
-        if (!res.ok) return;
-        const data = await res.json();
-        setClientMeta({ ip: data?.ip, country: data?.country });
+        if (res.ok) {
+          const data = await res.json();
+          setClientMeta({ ip: data?.ip, country: data?.country });
+        }
       } catch (error) {
         console.warn("Failed to fetch client metadata:", error);
+      } finally {
+        // Fallback: derive country from browser locale/timezone if IP API fails
+        try {
+          const hasCountry = Boolean(clientMeta.country);
+          if (!hasCountry && typeof navigator !== 'undefined') {
+            const lang = navigator.language;
+            const viaLang = (lang && /-[A-Z]{2}/i.test(lang)) ? lang.slice(-2).toUpperCase() : undefined;
+            const tz = typeof Intl !== 'undefined' && (Intl as any).DateTimeFormat ? (Intl as any).DateTimeFormat().resolvedOptions().timeZone : undefined;
+            const viaTz = tz && /Australia\//.test(tz) ? 'AU' : undefined;
+            const cc = viaLang || viaTz;
+            if (cc) setClientMeta((prev) => ({ ...prev, country: prev.country || cc }));
+          }
+        } catch (fallbackErr) {
+          console.debug("Locale fallback for client country failed:", fallbackErr);
+        }
       }
     })();
   }, []);
@@ -112,7 +128,9 @@ const StreamSession = ({
     apiKey: apiKey ?? undefined,
     assistantId,
     threadId: threadId ?? null,
-    defaultHeaders: undefined as any,
+    defaultHeaders: (clientMeta.country
+      ? { "X-Client-Country": clientMeta.country }
+      : undefined) as any,
     onCustomEvent: (event, options) => {
       
       if (isUIMessage(event) || isRemoveUIMessage(event)) {
@@ -147,6 +165,10 @@ const StreamSession = ({
       const contextData: Record<string, unknown> = {};
       if (clientMeta.country) {
         contextData.client_country = clientMeta.country;
+      } else if (typeof navigator !== 'undefined') {
+        const lang = navigator.language;
+        const cc = (lang && /-[A-Z]{2}/i.test(lang)) ? lang.slice(-2).toUpperCase() : undefined;
+        if (cc) contextData.client_country = cc;
       }
 
       const merged = params
@@ -158,7 +180,24 @@ const StreamSession = ({
             },
           }
         : params;
-      return streamValue.submit(merged as any, options);
+
+      // Also inject into run config so tools can read from configurable
+      const updatedOptions = {
+        ...(options || {}),
+        headers: {
+          ...((options && (options as any).headers) || {}),
+          ...(contextData.client_country ? { "X-Client-Country": contextData.client_country as string } : {}),
+        },
+        config: {
+          ...((options && options.config) || {}),
+          configurable: {
+            ...(((options && options.config && options.config.configurable) || {})),
+            ...(contextData.client_country ? { client_country: contextData.client_country } : {}),
+          },
+        },
+      };
+
+      return streamValue.submit(merged as any, updatedOptions);
     },
   } as typeof streamValue;
 

@@ -182,7 +182,6 @@ export function Thread() {
           config: {
             configurable: {
               user_id: effectiveUserId,
-              client_country: "AU",
             }
           },
           optimisticValues: (prev) => ({

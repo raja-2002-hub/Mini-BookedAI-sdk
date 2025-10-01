@@ -49,6 +49,15 @@ export const { GET, POST, PUT, PATCH, DELETE, OPTIONS, runtime } =
         nextBody.metadata = nextBody.metadata || {};
         nextBody.metadata.headers = { ...(nextBody.metadata.headers || {}), ...metaHeaders };
 
+        // Also mirror into config.configurable so the graph can always read it
+        if (country) {
+          nextBody.config = nextBody.config || {};
+          nextBody.config.configurable = {
+            ...(nextBody.config.configurable || {}),
+            client_country: nextBody.config?.configurable?.client_country || country,
+          };
+        }
+
         // Ensure signed-in user flows work in dev: mirror into messages.additional_kwargs
         if (userId && nextBody.input && Array.isArray(nextBody.input.messages)) {
           for (const m of nextBody.input.messages) {

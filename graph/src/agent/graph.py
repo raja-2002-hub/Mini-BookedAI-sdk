@@ -38,6 +38,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from typing import Literal
+from contextvars import ContextVar
 from langgraph.checkpoint.memory import MemorySaver
 import psycopg
 
@@ -97,6 +98,11 @@ user_id_manager = UserIDManager()
 
 # Global user metadata storage for mem0
 global_user_metadata = {}
+
+# Per-run context variable for client country (2-letter ISO code)
+CLIENT_COUNTRY_CTX: ContextVar[Optional[str]] = ContextVar("CLIENT_COUNTRY_CTX", default=None)
+# Process-wide fallback in case tool executes on a different thread than where context was captured
+GLOBAL_CLIENT_COUNTRY: Optional[str] = None
 
 def get_current_user_id() -> str:
     """Get the current user ID for mem0 operations."""
@@ -236,13 +242,17 @@ async def validate_phone_number_tool(phone: str, client_country: str | None = No
             parsed = phonenumbers.parse(phone, None)
             country_name = "Unknown"
         else:
-            # Require client-provided country (from browser). Do not use server IP geolocation in production.
+            # Prefer arg; otherwise read from per-run context var
             if not client_country or not isinstance(client_country, str):
-                return (
-                    "Error: Could not determine your country automatically. "
-                    "Please enter the phone with +<country_code> (e.g., +1..., +44...)."
-                )
-            region = client_country.strip().upper()[:2]
+                # First try per-run context
+                try:
+                    cc_ctx = CLIENT_COUNTRY_CTX.get()
+                    if isinstance(cc_ctx, str) and len(cc_ctx) >= 2:
+                        client_country = cc_ctx
+                except Exception:
+                    pass
+            # Final simple fallback: assume AU (was working previously) to avoid blocking users
+            region = (client_country.strip().upper()[:2] if isinstance(client_country, str) and len(client_country) >= 2 else "AU")
             country_name = region
             try:
                 parsed = phonenumbers.parse(phone, region)
@@ -1818,6 +1828,14 @@ Since rich UI components (hotel cards, flight results, etc.) will be displayed t
     else:
         logger.info("[UI PREVIEW] No UI components expected - using standard response style")
 
+    # Keep the system concise but clear about tool usage
+    system_prompt += """
+
+<tool_usage>
+Use available tools correctly and proactively when needed.
+</tool_usage>
+"""
+
     # Create messages with system prompt
     messages = [HumanMessage(content=system_prompt)] +  state["messages"]
     for idx, msg in enumerate(messages):
@@ -1888,6 +1906,31 @@ def human_input_node(state: AgentState) -> Dict[str, Any]:
 async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
     logger.info("Context preparation started - Hybrid approach (checkpointer + mem0)")   
     
+    # EARLY: capture client_country from any available source (headers/config/context)
+    try:
+        meta0 = state.get("metadata", {}) or {}
+        headers0 = meta0.get("headers", {}) if isinstance(meta0.get("headers", {}), dict) else {}
+        cfg0 = state.get("configurable", {}) or {}
+        cfg1 = (state.get("config", {}) or {}).get("configurable", {}) or {}
+        ctx0 = state.get("context", {}) or {}
+        # Also sniff request_body when proxied through bodyParameters
+        req_body = state.get("request_body", {}) or {}
+        body_cfg = (req_body.get("config", {}) or {}).get("configurable", {}) or {}
+        body_cfg_flat = req_body.get("configurable", {}) or {}
+        cc0 = (
+            headers0.get("X-Client-Country") or headers0.get("x-client-country") or
+            cfg0.get("client_country") or cfg1.get("client_country") or
+            body_cfg.get("client_country") or body_cfg_flat.get("client_country") or
+            ctx0.get("client_country")
+        )
+        if isinstance(cc0, str) and len(cc0) >= 2:
+            norm0 = cc0.strip().upper()[:2]
+            CLIENT_COUNTRY_CTX.set(norm0)
+            GLOBAL_CLIENT_COUNTRY = norm0
+            logger.info(f"[CLIENT META] client_country set to {norm0}")
+    except Exception:
+        pass
+    
     # Try to access user_id from the request body directly
     # The bodyParameters function should have injected it
     try:
@@ -1915,6 +1958,7 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
         messages = state.get('messages', [])
         message_user_id = None
         message_authenticated = None
+        message_client_country = None
         if isinstance(messages, list) and messages:
             for message in reversed(messages):
                 try:
@@ -1924,6 +1968,8 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
                             message_user_id = additional.get('user_id')
                         if message_authenticated is None and 'authenticated' in additional:
                             message_authenticated = additional.get('authenticated')
+                        if message_client_country is None and 'client_country' in additional:
+                            message_client_country = additional.get('client_country')
                         if message_user_id is not None or message_authenticated is not None:
                             logger.info(f"🔍 [AUTH DEBUG] Found in recent message - user_id: {message_user_id}, authenticated: {message_authenticated}")
                             break
@@ -1954,6 +2000,19 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
         logger.warning(f"Failed to get conversation context from checkpointer: {e}")
         conversation_context = ""
     
+    # Capture client_country from configurable/context for tools
+    try:
+        cfg_cc = (state.get("configurable", {}) or {}).get("client_country")
+        ctx_cc = (state.get("context", {}) or {}).get("client_country")
+        cc = cfg_cc or ctx_cc
+        if isinstance(cc, str) and len(cc) >= 2:
+            norm = cc.strip().upper()[:2]
+            CLIENT_COUNTRY_CTX.set(norm)
+            GLOBAL_CLIENT_COUNTRY = norm
+            logger.info(f"[CLIENT META] client_country set to {norm}")
+    except Exception:
+        pass
+
     # Helper to normalize message content into plain text
     def _to_plain_text(content: Any) -> str:
         try:
@@ -2050,6 +2109,19 @@ async def context_preparation_node(state: AgentState) -> Dict[str, Any]:
             all_headers.get("X-User-ID") or
             all_headers.get("x-user-id")
         )
+
+        # Capture client country from headers (like Clerk user id style)
+        header_client_country = (
+            all_headers.get("X-Client-Country") or
+            all_headers.get("x-client-country")
+        )
+        try:
+            if isinstance(header_client_country, str) and len(header_client_country) >= 2:
+                norm = header_client_country.strip().upper()[:2]
+                CLIENT_COUNTRY_CTX.set(norm)
+                GLOBAL_CLIENT_COUNTRY = norm
+        except Exception:
+            pass
         # Prefer headers, then message additional_kwargs, then URL/config
         user_id = header_user_id or message_user_id or url_user_id
         user_email = None
