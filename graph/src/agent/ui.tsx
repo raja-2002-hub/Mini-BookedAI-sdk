@@ -154,7 +154,8 @@ ${safeHotel.amenities.length > 0 ? `Amenities: ${safeHotel.amenities.join(', ')}
                   style={{ 
                     backgroundImage: `url(${safeHotel.image})`, 
                     backgroundSize: 'cover', 
-                    backgroundPosition: 'center' 
+                    backgroundPosition: 'center',
+                    cursor: 'pointer'
                   }}
                 >
                   <div className="absolute inset-0 bg-black/40" />
@@ -542,27 +543,27 @@ Price: ${flight.price || 'Price N/A'}
       min-width: 0;
     }
     #flight-cards-scope .airport-code {
-      font-size: 11px;
+      font-size: 9px;
       color: #6b7280;
       font-weight: 600;
       margin-bottom: 2px;
     }
     #flight-cards-scope .airport-name {
-      font-size: 11px;
+      font-size: 9px;
       color: #6b7280;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
     #flight-cards-scope .flight-time {
-      font-size: 18px;
+      font-size: 14px;
       font-weight: 700;
       color: #1f2937;
       margin-bottom: 2px;
     }
     #flight-cards-scope .flight-date {
-      font-size: 11px;
+      font-size: 9px;
       color: #6b7280;
       margin-top: 0;
     }
@@ -579,7 +580,7 @@ Price: ${flight.price || 'Price N/A'}
     #flight-cards-scope .duration-badge {
       background: transparent;
       color: #6b7280;
-      font-size: 10px;
+      font-size: 9px;
       font-weight: 500;
       padding: 0;
       border-radius: 0;

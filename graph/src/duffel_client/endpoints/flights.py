@@ -306,6 +306,30 @@ class FlightsEndpoint:
                 'title': 'Flight order cancellation failed',
                 'detail': str(e)
             })
+        
+    async def search_airports(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Search for airports by city name or IATA code."""
+        try:
+            # Use Duffel's airport search endpoint
+            params = {"query": query, "limit": limit}
+            response = await self.client.get("/air/airports", params=params)
+            return response.get("data", [])
+        except Exception as e:
+            logger.error(f"Airport search error: {e}")
+            return []
+
+    async def resolve_airport_code(self, location: str) -> Optional[str]:
+        """Resolve city name to IATA airport code."""
+        # If it's already an IATA code, return it
+        if len(location.strip()) == 3 and location.isalpha():
+            return location.upper()
+        
+        # Search for airports
+        airports = await self.search_airports(location, limit=1)
+        if airports:
+            return airports[0].get("iata_code")
+        
+        return None
     
     def _parse_flight_offers(self, offers: list) -> list:        
         formatted = []
@@ -403,7 +427,62 @@ class FlightsEndpoint:
         return formatted
     
     async def get_seat_maps(self, offer_id: str) -> dict:
-        return await self.client.get(f"/air/seat_maps?offer_id={offer_id}")
+        """Get seat maps with full parsing and formatting."""
+        response = await self.client.get(f"/air/seat_maps?offer_id={offer_id}")
+        
+        # Extract and structure seat information with pricing
+        seat_maps_data = response.get("data", [])
+        formatted_seats = []
+        
+        for seat_map in seat_maps_data:
+            segment_id = seat_map.get("segment_id")
+            slice_id = seat_map.get("slice_id")
+            cabins = seat_map.get("cabins", [])
+            
+            for cabin in cabins:
+                cabin_class = cabin.get("cabin_class", "unknown")
+                rows = cabin.get("rows", [])
+                
+                for row in rows:
+                    sections = row.get("sections", [])
+                    for section in sections:
+                        elements = section.get("elements", [])
+                        for element in elements:
+                            if element.get("type") == "seat":
+                                available_services = element.get("available_services", [])
+                                
+                                if available_services:
+                                    for service in available_services:
+                                        formatted_seats.append({
+                                            "service_id": service.get("id"),
+                                            "passenger_id": service.get("passenger_id"),
+                                            "designator": element.get("designator"),
+                                            "cabin_class": cabin_class,
+                                            "segment_id": segment_id,
+                                            "slice_id": slice_id,
+                                            "price": service.get("total_amount"),
+                                            "currency": service.get("total_currency"),
+                                            "available": True
+                                        })
+                                else:
+                                    formatted_seats.append({
+                                        "service_id": None,
+                                        "passenger_id": None,
+                                        "designator": element.get("designator"),
+                                        "cabin_class": cabin_class,
+                                        "segment_id": segment_id,
+                                        "slice_id": slice_id,
+                                        "price": None,
+                                        "currency": None,
+                                        "available": False
+                                    })
+        
+        return {
+            "raw_data": response,
+            "formatted_seats": formatted_seats,
+            "available_seats": [s for s in formatted_seats if s["available"]],
+            "total_available": len([s for s in formatted_seats if s["available"]])
+        }
 
     async def get_offer(self, offer_id: str) -> Dict[str, Any]:
         """
@@ -541,6 +620,39 @@ async def get_seat_maps(offer_id: str) -> dict:
         return await endpoint.get_seat_maps(offer_id)
     except Exception as e:
         raise DuffelAPIError(str(e))
+
+def calculate_seat_costs(selected_seats: list, formatted_seats: list) -> tuple:
+    """
+    Calculate total seat costs and return details.
+    
+    Args:
+        selected_seats: List of dicts with 'service_id'
+        formatted_seats: List of all formatted seat data from get_seat_maps
+        
+    Returns:
+        tuple: (total_cost, seat_details_list)
+    """
+    seat_lookup = {s["service_id"]: s for s in formatted_seats if s.get("service_id")}
+    total_cost = 0.0
+    seat_details = []
+    
+    for selected in selected_seats:
+        service_id = selected.get("service_id")
+        if not service_id:
+            continue
+            
+        seat_info = seat_lookup.get(service_id)
+        if seat_info and seat_info.get("available"):
+            price = float(seat_info.get("price", 0))
+            total_cost += price
+            seat_details.append({
+                "designator": seat_info.get("designator"),
+                "price": price,
+                "currency": seat_info.get("currency"),
+                "service_id": service_id
+            })
+    
+    return total_cost, seat_details
     
 async def fetch_flight_offer(offer_id: str) -> Dict[str, Any]:
     """
@@ -619,9 +731,9 @@ async def create_flight_booking(offer_id: str, passengers: list, payments: list,
     if services:
         order_data["services"] = services  # Add seat selections if provided
 
-    # 4. Add services if provided (following Duffel API structure)
-    if services and len(services) > 0:
-        order_data["services"] = services
+    # # 4. Add services if provided (following Duffel API structure)
+    # if services and len(services) > 0:
+    #     order_data["services"] = services
     
     try:
         logger.info(f"Booking flight with order data: {order_data}")
@@ -809,6 +921,52 @@ async def cancel_flight_booking_with_refund(
     except Exception as e:
         return json.dumps({"error": f"Unexpected error: {str(e)}"})
 
+async def search_airports(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Search for airports by city name or IATA code.
+    
+    Args:
+        query: City name or IATA code to search for
+        limit: Maximum number of results
+        
+    Returns:
+        List of airport dictionaries with iata_code, name, city, etc.
+    """
+    client = get_client()
+    endpoint = FlightsEndpoint(client)
+    return await endpoint.search_airports(query, limit)
 
+async def resolve_airport_code(location: str) -> Optional[str]:
+    """Resolve city name or location to IATA airport code.
+    
+    First checks if input is already an IATA code, then falls back to airport search.
+    
+    Args:
+        location: City name or IATA code
+        
+    Returns:
+        IATA code string or None if not found
+    """
+    if not location or not location.strip():
+        return None
+    
+    location = location.strip()
+    
+    # If it's already an IATA code (3 letters), return it
+    if len(location) == 3 and location.isalpha():
+        return location.upper()
+    
+    # Try to search for airports by this location
+    try:
+        airports = await search_airports(location, limit=1)
+        if airports and len(airports) > 0:
+            # Return the IATA code of the first (most relevant) airport
+            iata_code = airports[0].get("iata_code")
+            if iata_code:
+                logger.info(f"Resolved '{location}' to airport {iata_code} ({airports[0].get('name', 'Unknown')})")
+                return iata_code
+    except Exception as e:
+        logger.warning(f"Failed to resolve location '{location}' to IATA code: {e}")
+    
+    return None
 
     

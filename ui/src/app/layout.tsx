@@ -14,8 +14,8 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Booked AI",
-  description: "Booked AI - AI-Powered Booking Assistant",
+  title: "Booked AI - Your AI Travel Agent",
+  description: "Discover Booked AI, the app that turns travel planning into a conversation. Book flights, hotels, and activities instantly with AI",
 };
 
 export default function RootLayout({

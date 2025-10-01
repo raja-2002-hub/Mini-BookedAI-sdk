@@ -44,7 +44,7 @@ import psycopg
 
 # Import our Duffel client
 from src.duffel_client.endpoints.stays import search_hotels, fetch_hotel_rates, create_quote, create_booking, cancel_hotel_booking, update_hotel_booking, extend_hotel_stay
-from src.duffel_client.endpoints.flights import search_flights, format_flights_markdown, get_seat_maps,fetch_flight_offer, create_flight_booking, list_airline_initiated_changes, update_airline_initiated_change, accept_airline_initiated_change
+from src.duffel_client.endpoints.flights import search_flights, format_flights_markdown, get_seat_maps, calculate_seat_costs,fetch_flight_offer, create_flight_booking, list_airline_initiated_changes, update_airline_initiated_change, accept_airline_initiated_change
 from src.duffel_client.client import DuffelAPIError
 from src.config import config
 from mem0 import AsyncMemoryClient
@@ -286,10 +286,13 @@ async def search_flights_tool(
     I can find flights for one-way, round-trip, or multi-city journeys. 
     Supports all cabin classes (Economy, Premium Economy, Business, First) and up to 9 passengers.
 
+    Origin and destination can be city names (e.g., "Melbourne", "Paris") or IATA codes (e.g., "MEL", "CDG").
     Dates can be natural language like "next Friday" or "December 15th".
     Returns up to 5 options by default.
     """
     logger.info(f"Flight search initiated - Slices: {slices}, Passengers: {passengers}, Cabin: {cabin_class}, Max results: {max_results}")
+    from src.duffel_client.endpoints.flights import resolve_airport_code
+    
     try:
         # Validate slices
         if not isinstance(slices, list) or not slices:
@@ -298,6 +301,26 @@ async def search_flights_tool(
         for seg in slices:
             if not all(k in seg for k in ("origin", "destination", "departure_date")):
                 return "Error: Each slice must have 'origin', 'destination', and 'departure_date'."
+            
+            for key in ("origin", "destination"):
+                loc = seg[key]
+
+                # ----------------------------
+                # 1. Primary: Assume LLM gave a valid IATA
+                # ----------------------------
+                if isinstance(loc, str) and len(loc) == 3 and loc.isalpha():
+                    seg[key] = loc.upper()
+                    continue
+
+                # ----------------------------
+                # 2. Fallback: Try to resolve it
+                # ----------------------------
+                try:
+                    seg[key] = await resolve_airport_code(loc)
+                    logger.info(f"Fallback resolved {key} '{loc}' → {seg[key]}")
+                except Exception as e:
+                    return f"Error: Unable to resolve {key} '{loc}'. {str(e)}"
+            
             # Normalize the departure_date (async)
             seg["departure_date"] = await parse_and_normalize_date(seg["departure_date"])
             # Date validation
@@ -358,6 +381,7 @@ async def search_hotels_tool(
     """
 
     logger.info(f"Hotel search initiated - Location: {location}, Check-in: {check_in_date}, Check-out: {check_out_date}, Adults: {adults}, Children: {children}, Max results: {max_results}")
+    
     try:
         if adults is None:
             adults = 1
@@ -414,7 +438,7 @@ async def search_hotels_tool(
             children=children,
             limit=max_results
         )
-        logger.info("Hotel search completed")
+        logger.info("Hotel search completed")        
 
         # Use the new JSON formatter
         json_data = response.format_for_json(max_results=max_results)
@@ -900,21 +924,27 @@ async def flight_payment_sequence_tool(
     payment_method: Dict[str, Any]=None,
     phone_number: str = "",
     include_seat_map: bool = False,
+    selected_seats: list = None,
     **kwargs
 ) -> str:
     """
     Complete FLIGHT booking payment sequence.
     Use this tool ONLY for FLIGHT bookings.
-    
-    IMPORTANT: Collect passenger details (name, birth date, email, phone) first.
-    Payment information should only be requested after passenger details are confirmed. 
+
+     WORKFLOW:
+    1. First, collect passenger details (given_name, family_name, born_on, email, phone)
+    2. Ask if they want to select seats (set include_seat_map=True to show options)
+    3. If seats selected, calculate total cost including seat charges
+    4. Request payment information only after all above information is collected and confirmed
+    5. Process payment and create booking
     
     Args:
         offer_id: The flight offer ID (off_...)
         passengers: List of passenger details (must include given_name,born_on and family_name)
         email: Contact email
         phone_number: Contact phone number
-        include_seat_map: If True, retrieve seat map before booking
+        include_seat_map: Set True to retrieve and show available seats
+        selected_seats: List of selected seat dicts with 'service_id'
         payment_method: Payment information (card details, balance, etc.), optional initially
                         and requested only after passenger details are validated        
     
@@ -924,7 +954,7 @@ async def flight_payment_sequence_tool(
     logger.info(f"Flight payment sequence initiated for offer: {offer_id}")
     quote_data = await fetch_flight_offer(offer_id)
     logger.info(quote_data)
-    amount = quote_data.get("data", {}).get("total_amount")
+    base_amount = quote_data.get("data", {}).get("total_amount")
     currency = quote_data.get("data", {}).get("total_currency")
     outbound_slice = quote_data.get("data", {}).get("slices", [])[0] if quote_data.get("data", {}).get("slices") else {}
     return_slice = quote_data.get("data", {}).get("slices", [])[1] if len(quote_data.get("data", {}).get("slices", [])) > 1 else {}
@@ -933,6 +963,57 @@ async def flight_payment_sequence_tool(
             "status": "need_guest_info",
             "message": "Please provide complete guest details (given_name, family_name,born_on)"
         })
+    
+    # STEP 1: Handle seat selection flow
+    seat_total = 0.0
+    selected_seat_details = []
+    seat_maps_cache = None  # Cache to avoid double-fetching
+    
+    if include_seat_map and not selected_seats:
+        # First time - show seat map
+        logger.info("Retrieving seat map")
+        try:
+            seat_maps_cache = await get_seat_maps(offer_id)
+            
+            # Build minimal metadata for seat selection
+            metadata_for_seats = {
+                "offer_id": offer_id,
+                "passengers": passengers,
+                "email": email,
+                "phone_number": phone_number,
+                "base_price": base_amount,
+                "currency": currency
+            }
+            
+            return json.dumps({
+                "status": "seat_map_retrieved",
+                "message": f"Found {seat_maps_cache['total_available']} available seats. Select by service_id, or proceed without seat selection.",
+                "available_seats": seat_maps_cache["available_seats"],
+                "metadata": metadata_for_seats
+            })
+        except Exception as e:
+            logger.error(f"Seat map retrieval failed: {str(e)}")
+            return json.dumps({"error": f"Seat map retrieval failed: {str(e)}"})
+    
+    elif selected_seats:
+        # Second time - calculate seat costs
+        logger.info(f"Calculating costs for {len(selected_seats)} selected seats")
+        try:
+            # Fetch seat map only if not cached
+            if not seat_maps_cache:
+                seat_maps_cache = await get_seat_maps(offer_id)
+            
+            seat_total, selected_seat_details = calculate_seat_costs(
+                selected_seats, 
+                seat_maps_cache["formatted_seats"]
+            )
+            logger.info(f"Total seat cost: {seat_total} {currency}")
+        except Exception as e:
+            logger.error(f"Failed to calculate seat costs: {str(e)}")
+            return json.dumps({"error": f"Failed to calculate seat costs: {str(e)}"})
+    
+    # Calculate final amount
+    amount = float(base_amount) + seat_total
     
     metadata_info = {
         "passengers": passengers,
@@ -946,7 +1027,7 @@ async def flight_payment_sequence_tool(
         "airline_logo": quote_data["data"]["owner"]["logo_symbol_url"],
 
         # Pricing
-        "price": amount,
+        "price": str(amount),
         "currency": currency,
     }
 
@@ -971,25 +1052,7 @@ async def flight_payment_sequence_tool(
         }
 
     
-    # Step 1: Get seat map if requested
-    if include_seat_map and not kwargs.get("selected_seats"):
-        logger.info("Step 1: Retrieving seat map")
-        try:
-            seat_maps = await get_seat_maps(offer_id)
-            return json.dumps({
-            "status": "seat_map_retrieved",
-            "message": "Seat map retrieved. Please choose seats by their service_id and call again with 'selected_seats'.",
-            "seat_map": seat_maps,
-            "metadata": {
-                "offer_id": offer_id,
-                "passengers": passengers,
-                "email": email,
-                "phone_number": phone_number,
-                "payment_method": payment_method
-                }
-            })
-        except Exception as e:
-            return json.dumps({"error": f"Seat map retrieval failed: {str(e)}"})
+    
     
     # STEP 2 — Ask for payment if not provided
     if not payment_method:        
@@ -998,7 +1061,7 @@ async def flight_payment_sequence_tool(
             "ui_type": "paymentForm",
             "data": {
                 "title": "Complete Payment",
-                "amount": amount,
+                "amount": str(amount),
                 "currency": currency,
                 "fields": [
                     {
@@ -1047,7 +1110,7 @@ async def flight_payment_sequence_tool(
 
     # Create Stripe Payment Intent
     intent_response = await create_stripe_payment_intent(
-        amount=amount,
+        amount=str(amount),
         currency=currency,
         token_id=token_id,
         return_url="https://your-server.com/return"
@@ -1058,18 +1121,17 @@ async def flight_payment_sequence_tool(
     # Create payment object for Duffel
     payment = {
         "type": "balance",  
-        "amount": amount,
+        "amount": str(amount),
         "currency": currency,
         "stripe_payment_intent_id": payment_intent_id
     }
     payments = [payment]       
     
     # STEP 4 — Build services list if selected seats provided
-    services = []
-    if kwargs.get("selected_seats"):
-        logger.info(f"Adding {len(kwargs['selected_seats'])} selected seats to services list")
-        for seat in kwargs["selected_seats"]:
-            services.append({"id": seat["service_id"], "quantity": 1})
+    services = None
+    if selected_seats:
+        services = [{"id": seat["service_id"], "quantity": 1} for seat in selected_seats]
+        logger.info(f"Adding {len(services)} seat services to booking")
 
     logger.info("Step 3: Creating booking")
 
@@ -1571,7 +1633,7 @@ def create_llm():
         logger.error("OPENAI_API_KEY environment variable not set")
         raise ValueError("OPENAI_API_KEY environment variable is required")
 
-    logger.info("LLM instance created successfully with gpt-3.5-turbo")
+    logger.info("LLM instance created successfully with gpt-4o")
     return ChatOpenAI(
         model="gpt-4o",
         temperature=0.1,
@@ -1721,7 +1783,7 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
         fetch_hotel_rates_tool,
         create_hotel_quote_tool,
         fetch_flight_quote_tool,
-        get_seat_maps_tool,
+        # get_seat_maps_tool,
         list_airline_initiated_changes_tool,
         update_airline_initiated_change_tool,
         accept_airline_initiated_change_tool,
@@ -1740,6 +1802,7 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
         recall_tool,
         extend_hotel_stay_tool
     ]
+    
     llm_with_tools = llm.bind_tools(tools)
     
     # System prompt
@@ -1757,6 +1820,11 @@ You are a knowledgeable and personable AI travel consultant for Booked AI. You c
 
 <instructions>
 Act as a proactive travel consultant who builds a complete understanding of each traveler's unique needs before making recommendations. Guide users through a personalized consultation process to uncover their ideal trip.
+
+IMPORTANT: When you're about to search for flights or hotels, always include a brief acknowledgment in your response before calling the tool. For example:
+- "Let me search for flights for you..." (before search_flights_tool)
+- "I'll find hotels in that area..." (before search_hotels_tool)
+
 </instructions>
 
  <memory_instructions>
@@ -1847,7 +1915,7 @@ Use available tools correctly and proactively when needed.
     ui_enabled = state.get("ui_enabled", True)
 
     # Handle push UI message with improved logic for multiple tool calls
-    if ui_enabled:
+    if ui_enabled:    
 
         # Find all recent tool messages that could need UI components
         # Look for tool messages that came after the last human/AI message
@@ -3120,7 +3188,7 @@ def create_graph():
             fetch_hotel_rates_tool,
             create_hotel_quote_tool,
             fetch_flight_quote_tool,
-            get_seat_maps_tool,
+            # get_seat_maps_tool,
             list_airline_initiated_changes_tool,
             update_airline_initiated_change_tool,
             accept_airline_initiated_change_tool,
