@@ -1,12 +1,14 @@
 "use client";
 
-import { SignIn } from '@clerk/nextjs';
+import { SignIn, useAuth } from '@clerk/nextjs';
 import { Button } from '@/components/ui/button';
 import React, { useEffect, useState } from 'react';
 
 
 export default function SignInPage() {
   const [isMounted, setIsMounted] = useState(false);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const { isSignedIn } = useAuth();
 
   const handleGuestMode = () => {
     sessionStorage.setItem('guestMode', 'true');
@@ -16,6 +18,18 @@ export default function SignInPage() {
   // Handle hydration
   useEffect(() => {
     setIsMounted(true);
+    
+    // Check if we're coming back from OAuth (has __clerk params) or in authenticating state
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const isInAuthFlow = sessionStorage.getItem('isAuthenticating') === 'true';
+      
+      if (params.toString().includes('__clerk') || isInAuthFlow) {
+        console.log('Detected OAuth callback - showing loading screen');
+        sessionStorage.setItem('isAuthenticating', 'true');
+        setIsAuthenticating(true);
+      }
+    }
     
     // Function to check and hide OAuth errors
     const checkAndHideErrors = () => {
@@ -28,7 +42,9 @@ export default function SignInPage() {
             (text.includes('no account') && text.includes('transfer')) ||
             (text.includes('there is no') && text.includes('account')) ||
             text.includes('already signed in')) {
-          console.log('Detected OAuth error - hiding and redirecting...');
+          console.log('Detected OAuth error - showing loading and redirecting...');
+          // Show loading screen
+          setIsAuthenticating(true);
           // Hide the error immediately
           if (el instanceof HTMLElement) {
             el.style.display = 'none';
@@ -40,12 +56,26 @@ export default function SignInPage() {
             }
           }
           clearInterval(checkForErrors);
-          // Set guest mode temporarily so home page doesn't redirect back
-          sessionStorage.setItem('guestMode', 'true');
-          // Wait a bit for Clerk to establish session, then redirect
-          setTimeout(() => {
-            window.location.href = '/';
-          }, 1500);
+          
+          // If not already showing loading, show it now
+          if (!isAuthenticating) {
+            sessionStorage.setItem('isAuthenticating', 'true');
+            setIsAuthenticating(true);
+          }
+          
+          // Poll until user is signed in, then redirect
+          let pollCount = 0;
+          const pollInterval = setInterval(() => {
+            pollCount++;
+            console.log('Checking auth status...', isSignedIn);
+            // Check if signed in or timeout after 10 seconds
+            if (isSignedIn || pollCount > 20) {
+              clearInterval(pollInterval);
+              console.log('Redirecting to home, isSignedIn:', isSignedIn);
+              sessionStorage.removeItem('isAuthenticating');
+              window.location.href = '/';
+            }
+          }, 500);
         }
       });
     };
@@ -61,11 +91,27 @@ export default function SignInPage() {
 
 
   // Prevent hydration mismatch by showing loading state initially
-  if (!isMounted) {
+  // Also show loading if in auth flow
+  if (!isMounted || (typeof window !== 'undefined' && sessionStorage.getItem('isAuthenticating') === 'true')) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
-        <div className="w-full max-w-md">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-700 dark:text-gray-300 text-lg">Completing sign-up...</p>
+          <p className="text-gray-500 dark:text-gray-400 text-sm mt-2">Please wait while we set up your account</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Show loading screen while authenticating
+  if (isAuthenticating) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-700 dark:text-gray-300 text-lg">Completing sign-up...</p>
+          <p className="text-gray-500 dark:text-gray-400 text-sm mt-2">Please wait while we set up your account</p>
         </div>
       </div>
     );

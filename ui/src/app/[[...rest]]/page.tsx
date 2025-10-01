@@ -57,25 +57,6 @@ export default function CatchAllPage(): React.ReactNode {
     }
   }, [isLoaded, isSignedIn, router, isMounted]);
 
-  // Periodically check if user becomes signed in and remove guest mode
-  React.useEffect(() => {
-    if (!isMounted) return;
-    
-    const checkAuthInterval = setInterval(() => {
-      if (isSignedIn && typeof window !== 'undefined') {
-        const guestMode = sessionStorage.getItem('guestMode');
-        if (guestMode === 'true') {
-          console.log('User is now signed in, removing guest mode');
-          sessionStorage.removeItem('guestMode');
-          setShowGuestMode(false);
-          // Force a re-render to update the UI
-          window.location.reload();
-        }
-      }
-    }, 500);
-    
-    return () => clearInterval(checkAuthInterval);
-  }, [isMounted, isSignedIn]);
 
   // Show loading state during hydration
   if (!isLoaded || !isMounted) {
