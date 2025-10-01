@@ -13,7 +13,8 @@ export function ErrorSuppressor() {
           message.includes('already signed in') || message.includes('you are already signed in') ||
           message.includes('external account was not found') || message.includes('the external account was not found') ||
           message.includes('runtime error') || message.includes('account to transfer') ||
-          message.includes('transfer') || message.includes('account')) {
+          message.includes('transfer') || message.includes('account') ||
+          message.includes('failed to load clerk') || message.includes('clerk: failed')) {
         return; // Suppress these errors
       }
       originalError.apply(console, args);

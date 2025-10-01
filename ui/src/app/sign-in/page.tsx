@@ -1,6 +1,6 @@
 "use client";
 
-import { SignIn, useAuth } from '@clerk/nextjs';
+import { SignIn, useAuth, useClerk } from '@clerk/nextjs';
 import { Button } from '@/components/ui/button';
 import React, { useEffect, useState } from 'react';
 
@@ -9,6 +9,7 @@ export default function SignInPage() {
   const [isMounted, setIsMounted] = useState(false);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const { isSignedIn } = useAuth();
+  const clerk = useClerk();
 
   const handleGuestMode = () => {
     sessionStorage.setItem('guestMode', 'true');
@@ -65,13 +66,16 @@ export default function SignInPage() {
           
           // Poll until user is signed in, then redirect
           let pollCount = 0;
-          const pollInterval = setInterval(() => {
+          const pollInterval = setInterval(async () => {
             pollCount++;
-            console.log('Checking auth status...', isSignedIn);
-            // Check if signed in or timeout after 10 seconds
-            if (isSignedIn || pollCount > 20) {
+            // Check clerk.session directly instead of relying on hook value
+            const hasSession = clerk.session !== null && clerk.session !== undefined;
+            console.log('Checking auth status...', { hasSession, pollCount, sessionId: clerk.session?.id });
+            
+            // Check if signed in or timeout after 15 seconds (longer for Railway)
+            if (hasSession || pollCount > 30) {
               clearInterval(pollInterval);
-              console.log('Redirecting to home, isSignedIn:', isSignedIn);
+              console.log('Redirecting to home, hasSession:', hasSession);
               sessionStorage.removeItem('isAuthenticating');
               window.location.href = '/';
             }

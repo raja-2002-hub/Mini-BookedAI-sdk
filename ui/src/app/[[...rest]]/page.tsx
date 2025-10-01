@@ -42,20 +42,13 @@ export default function CatchAllPage(): React.ReactNode {
       }
       setShowGuestMode(false);
     } else {
-      const guestMode = typeof window !== 'undefined' ? sessionStorage.getItem('guestMode') === 'true' : false;
-      setShowGuestMode(guestMode);
-      
-      // Only redirect to sign-in if not in guest mode and no URL params (not from OAuth)
-      if (!guestMode && typeof window !== 'undefined') {
-        const urlParams = new URLSearchParams(window.location.search);
-        const hasUrlParams = urlParams.toString().length > 0;
-        
-        if (!hasUrlParams) {
-          router.push('/sign-in');
-        }
+      // Default to guest mode - users can sign in if they want
+      setShowGuestMode(true);
+      if (typeof window !== 'undefined') {
+        sessionStorage.setItem('guestMode', 'true');
       }
     }
-  }, [isLoaded, isSignedIn, router, isMounted]);
+  }, [isLoaded, isSignedIn, isMounted]);
 
 
   // Show loading state during hydration
