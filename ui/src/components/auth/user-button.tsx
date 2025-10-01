@@ -13,12 +13,12 @@ export function AuthUserButton() {
   }
 
   if (!isSignedIn) {
-    // Show Sign In button for guest users
+    // Show Sign In button for guest users (navigates to sign-up flow)
     return (
       <Button 
         variant="outline" 
         size="sm"
-        onClick={() => router.push('/sign-in')}
+        onClick={() => router.push('/sign-up')}
         className="text-sm"
       >
         Sign In

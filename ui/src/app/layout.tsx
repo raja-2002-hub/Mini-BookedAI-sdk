@@ -54,7 +54,7 @@ export default function RootLayout({
       <body className={inter.className}>
         <ClerkProvider
           publishableKey={process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
-          signInUrl="/sign-in"
+          signInUrl="/sign-up"
           signUpUrl="/sign-up"
           appearance={{
             elements: {
@@ -64,6 +64,12 @@ export default function RootLayout({
           }}
           localization={{
             locale: 'en',
+            signUp: {
+              start: {
+                actionText: '',
+                actionLink: '',
+              },
+            },
           }}
           afterSignInUrl="/"
           afterSignUpUrl="/"

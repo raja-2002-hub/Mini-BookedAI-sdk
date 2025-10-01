@@ -148,4 +148,21 @@
   .shadow-inner-left {
     box-shadow: inset 9px 0 6px -1px rgb(0 0 0 / 0.02);
   }
+
+  /* Hide only the SignUp "Sign in" prompt; keep Secured by Clerk visible */
+  [data-clerk-component="SignUp"] .cl-footerAction,
+  [data-clerk-component="SignUp"] .cl-footerAction__text,
+  [data-clerk-component="SignUp"] .cl-footerAction__link,
+  [data-clerk-component="SignUp"] [data-localization-key="signUp.start.actionText"],
+  [data-clerk-component="SignUp"] [data-localization-key="signUp.start.actionLink"],
+  [data-clerk-component="SignUp"] a[href*="sign-in"],
+  [data-clerk-component="SignUp"] a[href*="/sign-in"] {
+    display: none !important;
+    height: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: 0 !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+  }
 }
