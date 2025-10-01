@@ -24,24 +24,35 @@ function AppContent() {
 export default function CatchAllPage(): React.ReactNode {
   const { isSignedIn, isLoaded } = useAuth();
   const [showGuestMode, setShowGuestMode] = React.useState(false);
+  const [isMounted, setIsMounted] = React.useState(false);
   const router = useRouter();
 
-  // Check sessionStorage for guest mode on component mount
+  // Handle hydration
   React.useEffect(() => {
-    const guestMode = sessionStorage.getItem('guestMode');
-    if (guestMode === 'true') {
-      setShowGuestMode(true);
-    }
+    setIsMounted(true);
   }, []);
 
-  // Redirect to sign-in page for non-authenticated users
+  // Check authentication state and guest mode
   React.useEffect(() => {
-    if (isLoaded && !isSignedIn && !showGuestMode) {
-      router.push('/sign-in');
-    }
-  }, [isLoaded, isSignedIn, showGuestMode, router]);
+    if (!isMounted || !isLoaded) return;
 
-  if (!isLoaded) {
+    if (isSignedIn) {
+      if (typeof window !== 'undefined') {
+        sessionStorage.removeItem('guestMode');
+      }
+      setShowGuestMode(false);
+    } else {
+      // Default to guest mode - users can sign in if they want
+      setShowGuestMode(true);
+      if (typeof window !== 'undefined') {
+        sessionStorage.setItem('guestMode', 'true');
+      }
+    }
+  }, [isLoaded, isSignedIn, isMounted]);
+
+
+  // Show loading state during hydration
+  if (!isLoaded || !isMounted) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>

@@ -2,9 +2,11 @@
 
 import { SignUp } from '@clerk/nextjs'
 import { Button } from '@/components/ui/button'
-import React from "react";
+import React, { useEffect, useState } from "react";
+
 
 export default function SignUpPage() {
+  const [isMounted, setIsMounted] = useState(false);
 
   const handleGuestMode = () => {
     // Use sessionStorage instead of localStorage for session-only guest mode
@@ -13,12 +15,34 @@ export default function SignUpPage() {
     window.location.href = '/';
   };
 
+
+  // Handle hydration
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+
+  // Prevent hydration mismatch by showing loading state initially
+  if (!isMounted) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
+        <div className="w-full max-w-md">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
       <div className="w-full max-w-md">
         <SignUp 
           routing="path"
           path="/sign-up"
+          signInUrl="/sign-in"
+          afterSignUpUrl="/"
+          afterSignInUrl="/"
+          fallbackRedirectUrl="/"
           appearance={{
             elements: {
               formButtonPrimary: 
@@ -31,6 +55,8 @@ export default function SignUpPage() {
               formFieldInput: 
                 "border border-gray-300 focus:border-blue-500 dark:border-gray-600 dark:focus:border-blue-400",
               footerActionLink: "text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300",
+              // Disable CAPTCHA completely
+              captcha: 'none',
             },
           }}
         />
