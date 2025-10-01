@@ -21,6 +21,61 @@ export default function SignUpPage() {
     setIsMounted(true);
   }, []);
 
+  // Force-hide any Clerk footer/sign-in elements that may render after hydration
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const hideClerkSignIn = () => {
+      const selectors = [
+        '[data-clerk-component="SignUp"] .cl-footerAction',
+        '[data-clerk-component="SignUp"] .cl-footerAction__text',
+        '[data-clerk-component="SignUp"] .cl-footerAction__link',
+        '[data-clerk-component="SignUp"] [data-localization-key="signUp.start.actionText"]',
+        '[data-clerk-component="SignUp"] [data-localization-key="signUp.start.actionLink"]',
+        '[data-clerk-component="SignUp"] a[href*="sign-in"]',
+        '[data-clerk-component="SignUp"] a[href*="/sign-in"]',
+      ];
+      document.querySelectorAll(selectors.join(',')).forEach((el) => {
+        const element = el as HTMLElement;
+        element.style.display = 'none';
+        element.style.height = '0px';
+        element.style.padding = '0px';
+        element.style.margin = '0px';
+        element.style.border = '0px';
+        element.setAttribute('aria-hidden', 'true');
+      });
+
+      // As a fallback, hide any element whose text is exactly "Sign in"
+      const container = document.querySelector('[data-clerk-component="SignUp"]');
+      if (container) {
+        const allNodes = Array.from(container.querySelectorAll('*')) as HTMLElement[];
+        allNodes.forEach((node) => {
+          const text = (node.textContent || '').trim().toLowerCase();
+          if (text === 'sign in') {
+            // Hide the node and its nearest container to remove spacing
+            node.style.display = 'none';
+            node.setAttribute('aria-hidden', 'true');
+            const parent = node.closest('.cl-footer, .cl-cardFooter, .cl-footerAction, div, p, span');
+            if (parent && parent instanceof HTMLElement) {
+              parent.style.display = 'none';
+              parent.setAttribute('aria-hidden', 'true');
+            }
+          }
+        });
+      }
+    };
+
+    // Run immediately and for a short period to catch late mounts
+    hideClerkSignIn();
+    const intervalId = setInterval(hideClerkSignIn, 100);
+    const timeoutId = setTimeout(() => clearInterval(intervalId), 3000);
+
+    return () => {
+      clearInterval(intervalId);
+      clearTimeout(timeoutId);
+    };
+  }, []);
+
 
   // Prevent hydration mismatch by showing loading state initially
   if (!isMounted) {
@@ -39,12 +94,16 @@ export default function SignUpPage() {
         <SignUp 
           routing="path"
           path="/sign-up"
-          signInUrl="/sign-in"
           afterSignUpUrl="/"
           afterSignInUrl="/"
           fallbackRedirectUrl="/"
           appearance={{
             elements: {
+              footer: 'hidden',
+              footerAction: 'hidden',
+              footerActionLink: 'hidden',
+              footerActionText: 'hidden',
+              cardFooter: 'hidden',
               formButtonPrimary: 
                 "bg-blue-600 hover:bg-blue-700 text-sm normal-case",
               card: "shadow-xl border-0",
@@ -54,7 +113,6 @@ export default function SignUpPage() {
                 "border border-gray-300 hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700",
               formFieldInput: 
                 "border border-gray-300 focus:border-blue-500 dark:border-gray-600 dark:focus:border-blue-400",
-              footerActionLink: "text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300",
               // Disable CAPTCHA completely
               captcha: 'none',
             },
