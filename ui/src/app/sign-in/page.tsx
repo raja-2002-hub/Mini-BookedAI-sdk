@@ -16,6 +16,47 @@ export default function SignInPage() {
   // Handle hydration
   useEffect(() => {
     setIsMounted(true);
+    
+    // Function to check and hide OAuth errors
+    const checkAndHideErrors = () => {
+      // Check all elements with role="alert" and any element with error text
+      const allElements = Array.from(document.querySelectorAll('[role="alert"], div, p, span'));
+      allElements.forEach((el) => {
+        const text = el.textContent?.toLowerCase() || '';
+        if ((text.includes('external account') && text.includes('not found')) ||
+            (text.includes('account') && text.includes('transfer')) ||
+            (text.includes('no account') && text.includes('transfer')) ||
+            (text.includes('there is no') && text.includes('account')) ||
+            text.includes('already signed in')) {
+          console.log('Detected OAuth error - hiding and redirecting...');
+          // Hide the error immediately
+          if (el instanceof HTMLElement) {
+            el.style.display = 'none';
+            // Also hide parent containers
+            let parent = el.parentElement;
+            for (let i = 0; i < 5 && parent; i++) {
+              parent.style.display = 'none';
+              parent = parent.parentElement;
+            }
+          }
+          clearInterval(checkForErrors);
+          // Set guest mode temporarily so home page doesn't redirect back
+          sessionStorage.setItem('guestMode', 'true');
+          // Wait a bit for Clerk to establish session, then redirect
+          setTimeout(() => {
+            window.location.href = '/';
+          }, 1500);
+        }
+      });
+    };
+    
+    // Run immediately
+    checkAndHideErrors();
+    
+    // Watch for OAuth errors and auto-redirect every 50ms
+    const checkForErrors = setInterval(checkAndHideErrors, 50);
+    
+    return () => clearInterval(checkForErrors);
   }, []);
 
 
