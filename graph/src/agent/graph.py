@@ -1843,6 +1843,7 @@ When providing recommendations:
 
 <rules>
 Only discuss travel related topics.
+IMPORTANT: if you face errors with tool calls abide by error messages and retry and recover without bothering the user. Instil them with confidence that you've got this!
 </rules>
 """
     
