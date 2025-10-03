@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A hands-on mini project designed for new team members to learn LangGraph agent development while building a practical travel search application using the Duffel API.
+A hands-on mini project designed for new team members to learn LangGraph agent development while building a practical travel search application using the Duffel API :) 
 
 ## Initial Concept Evolution
 
