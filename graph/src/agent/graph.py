@@ -12,7 +12,8 @@ from uuid import uuid4
 import phonenumbers
 from phonenumbers.phonenumberutil import NumberParseException
 import httpx
-
+import os
+from langchain_openai import ChatOpenAI
 import dateparser
 import re
  
@@ -1626,19 +1627,25 @@ async def change_flight_booking_tool(
 
 # Create the LLM
 def create_llm():
-    """Create and configure the language model."""
+    """Create and configure the language model (local by default)."""
     logger.debug("Creating LLM instance")
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        logger.error("OPENAI_API_KEY environment variable not set")
-        raise ValueError("OPENAI_API_KEY environment variable is required")
 
-    logger.info("LLM instance created successfully with gpt-4o")
-    return ChatOpenAI(
-        model="gpt-4o",
+    # Read from .env; fall back to Ollama defaults
+    model = os.getenv("OPENAI_MODEL", "llama3.1:latest")
+    base_url = os.getenv("OPENAI_BASE_URL", "http://127.0.0.1:11434/v1")
+    api_key = os.getenv("OPENAI_API_KEY") or "sk-local-anything"  # Ollama accepts any string
+
+    if not os.getenv("OPENAI_API_KEY"):
+        logger.warning("OPENAI_API_KEY not set; using local default for Ollama")
+
+    llm = ChatOpenAI(
+        model=model,
+        base_url=base_url,          # crucial: points to Ollama’s OpenAI-compatible server
+        api_key=SecretStr(api_key),
         temperature=0.1,
-        api_key=SecretStr(api_key)
     )
+    logger.info(f"LLM instance created successfully with {model} @ {base_url}")
+    return llm
 
 def should_push_ui_message(tool_message: ToolMessage, tool_data: Dict[str, Any]) -> tuple[bool, str | None]:
     """
@@ -2412,15 +2419,26 @@ async def remember_tool(memory_content: str, context: str = "") -> str:
                     # Use a small model to judge contradiction about preference truth value
                     from langchain_openai import ChatOpenAI
                     def _check() -> bool:
-                        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+                        MODEL = os.getenv("OPENAI_MODEL", "llama3.1:latest")
+                        BASE_URL = os.getenv("OPENAI_BASE_URL", "http://127.0.0.1:11434/v1")
+                        API_KEY = os.getenv("OPENAI_API_KEY", "sk-local-anything")
+
+                        llm = ChatOpenAI(
+                            model=MODEL,
+                            base_url=BASE_URL,
+                            api_key=API_KEY,
+                            temperature=0,
+                            # optional: timeout=60, max_retries=0,
+                        )
+
                         prompt = (
                             "You compare two short statements about a user's preference.\n"
-                            "If they contradict (one says they like/prefer/enjoy and the other says they don't/stop/dislike),"
-                            " answer 'yes'. Otherwise answer 'no'.\n"
+                            "If they contradict (one says they like/prefer/enjoy and the other says they don't/stop/dislike), "
+                            "answer 'yes'. Otherwise answer 'no'.\n"
                             f"A: {new_text}\nB: {old_text}\nAnswer yes or no only:"
                         )
                         out = llm.invoke(prompt).content.strip().lower()
-                        return out.startswith("y")
+                        return out == "yes"
                     return await _asyncio.to_thread(_check)
                 except Exception:
                     # Fallback minimal heuristic

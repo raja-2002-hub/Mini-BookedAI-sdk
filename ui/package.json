@@ -1,6 +1,5 @@
 {
   "name": "agent-chat-ui",
-  "readme": "https://github.com/langchain-ai/agent-chat-ui/blob/main/README.md",
   "homepage": "https://agentchat.vercel.app",
   "repository": {
     "type": "git",
@@ -37,6 +36,7 @@
     "date-fns": "^4.1.0",
     "esbuild": "^0.25.8",
     "esbuild-plugin-tailwindcss": "^2.0.1",
+    "express": "^5.1.0",
     "framer-motion": "^12.23.12",
     "katex": "^0.16.22",
     "langgraph-nextjs-api-passthrough": "^0.1.4",
@@ -44,8 +44,8 @@
     "lucide-react": "^0.537.0",
     "next-themes": "^0.4.6",
     "nuqs": "^2.4.3",
-    "react": "^19.1.1",
-    "react-dom": "^19.1.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
     "react-syntax-highlighter": "^15.6.1",
     "recharts": "^3.1.2",
@@ -68,6 +68,7 @@
     "@types/react-dom": "^19.1.7",
     "@types/react-syntax-highlighter": "^15.5.13",
     "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^5.0.4",
     "autoprefixer": "^10.4.21",
     "dotenv": "^17.2.1",
     "eslint": "^9.32.0",
@@ -82,12 +83,21 @@
     "prettier": "^3.6.2",
     "prettier-plugin-tailwindcss": "^0.6.14",
     "tailwind-scrollbar": "^4.0.2",
-    "tailwindcss": "^4.1.11",
+    "tailwindcss": "^4.1.14",
     "typescript": "~5.9.2",
-    "typescript-eslint": "^8.39.0"
+    "typescript-eslint": "^8.39.0",
+    "vite": "^7.1.10"
   },
   "overrides": {
     "react-is": "^19.0.0-rc-69d4b800-20241021"
   },
-  "packageManager": "pnpm@10.5.1"
+  "packageManager": "pnpm@10.5.1",
+  "description": "https://github.com/langchain-ai/agent-chat-ui/blob/main/README.md",
+  "bugs": {
+    "url": "https://github.com/langchain-ai/agent-chat-ui/issues"
+  },
+  "main": "eslint.config.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
 }

@@ -49,4 +49,4 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
-*.so 
+*.so .venv/
