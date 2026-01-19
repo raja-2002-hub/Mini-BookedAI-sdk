@@ -1,12 +1,12 @@
 [variables]
 PYTHONPATH = "/app/src"
-NIXPACKS_METADATA = "python,uv,nodejs"
 
 [phases.setup]
-nixPkgs = ["python312", "uv", "nodejs"]
+nixPkgs = ["python312"]
 
 [phases.install]
 dependsOn = ["setup"]
-cmds = ["uv sync --frozen"]
+cmds = ["pip install -r requirements.txt"]
 
-# Railway will use the custom Dockerfile instead 
+[start]
+cmd = "python mcp_adapter/Server_F.py"
