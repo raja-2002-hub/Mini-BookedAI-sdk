@@ -4017,8 +4017,19 @@ async def widget_block_next_flight_checkout(request: Request):
     return PlainTextResponse("ok")
 
 
+async def health_check(request: Request):
+    return JSONResponse({"status": "ok", "service": "BookedAI MCP Server"})
 
-    
+async def root_route(request: Request):
+    return JSONResponse({
+        "name": "BookedAI MCP Server",
+        "mcp_endpoint": "/mcp",
+        "status": "running"
+    })
+
+# Add these routes
+app.router.routes.append(Route("/", root_route, methods=["GET"]))
+app.router.routes.append(Route("/health", health_check, methods=["GET"]))
 app.router.routes.append(Route("/checkout",      checkout_post_route, methods=["POST"]))
 app.router.routes.append(Route("/checkout/link", checkout_link_route, methods=["GET"]))
 app.router.routes.append(Route("/success",  success_route,  methods=["GET"]))
