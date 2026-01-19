@@ -1003,6 +1003,8 @@ mcp = FastMCP(
     sse_path="/mcp",
     message_path="/mcp/messages",
     stateless_http=True,
+    host="0.0.0.0",
+    allowed_origins=["*"],
 )
 
 # ---------- list tools (Registering All the tools and it Resources )----------
