@@ -1,5 +1,6 @@
 {
   "name": "ui-widgets",
+  "type": "module",
   "version": "1.0.1",
   "private": true,
   "description": "UI widgets for Apps SDK (Vite + React)",
