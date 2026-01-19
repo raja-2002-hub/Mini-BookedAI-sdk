@@ -57,6 +57,8 @@ RUN npm install -g typescript @types/react @types/react-dom react react-dom next
 ENV LANGGRAPH_UI_EXTERNALS='["uuid"]'
 RUN npm install uuid
 
+RUN pip install --no-cache-dir -r requirements.txt
+
 # --------------------------
 # Patch asyncio for uvloop subprocess env
 # --------------------------
