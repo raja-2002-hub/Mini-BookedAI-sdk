@@ -1,6 +1,7 @@
 # graph/mcp_adapter/server.py
 from __future__ import annotations
 
+import sys
 class _MockTransportSecurity:
     """Mock transport security that allows all hosts (for Railway deployment)"""
     @staticmethod
