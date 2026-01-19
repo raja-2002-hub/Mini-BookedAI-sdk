@@ -205,6 +205,10 @@ def _widget_html(root_id: str, css_url: str, js_url: str) -> str:
     )
 
 def resolve_widget_html(name: str, root_id: str) -> str:
+    """
+    Try to load widget HTML from local assets.
+    If local assets don't exist, return a remote-loading stub.
+    """
     try:
         html_name = _pick_hashed_asset(ASSETS_DIR, name, "html")
         raw_html = (ASSETS_DIR / html_name).read_text(encoding="utf-8")
@@ -214,15 +218,22 @@ def resolve_widget_html(name: str, root_id: str) -> str:
             .replace('href="/assets/', f'href="{ASSETS_BASE_URL}/')
         )
     except FileNotFoundError:
-        css = _pick_hashed_asset(ASSETS_DIR, name, "css")
-        js  = _pick_hashed_asset(ASSETS_DIR, name, "js")
-        return _widget_html(f"{name}-root", f"{ASSETS_BASE_URL}/{css}", f"{ASSETS_BASE_URL}/{js}")
+        # Local assets not found - use remote URL fallback
+        # This happens in production when ui-widgets is a separate service
+        log.info(f"Local assets not found for {name}, using remote ASSETS_BASE_URL: {ASSETS_BASE_URL}")
+        
+        # Return a simple stub that loads from remote
+        return (
+            f'<div id="{root_id}"></div>\n'
+            f'<link rel="stylesheet" href="{ASSETS_BASE_URL}/{name}.css">\n'
+            f'<script type="module" src="{ASSETS_BASE_URL}/{name}.js"></script>'
+        )
     except Exception as e:
+        log.warning(f"Error resolving widget {name}: {e}")
         return (
             f'<div style="padding:12px;font-family:system-ui">'
-            f'<b>{name} assets not found.</b> {e}</div>'
+            f'<b>{name} widget loading from remote...</b></div>'
         )
-
 
 @dataclass(frozen=True)
 class Widget:
