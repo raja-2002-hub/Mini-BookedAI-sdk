@@ -2,26 +2,6 @@
 from __future__ import annotations
 
 import sys
-class _MockTransportSecurity:
-    """Mock transport security that allows all hosts (for Railway deployment)"""
-    @staticmethod
-    def validate_host(*args, **kwargs):
-        return None
-    
-    @staticmethod
-    def _validate_host(*args, **kwargs):
-        return None
-    
-    @staticmethod
-    def check_host(*args, **kwargs):
-        return True
-    
-    # Add any other methods that might be called
-    def __getattr__(self, name):
-        return lambda *args, **kwargs: None
-
-# Inject the mock BEFORE mcp is imported
-sys.modules['mcp.server.transport_security'] = _MockTransportSecurity()
 import os, sys, site, logging, json, re, traceback
 from pathlib import Path
 from dataclasses import dataclass
@@ -161,6 +141,32 @@ except Exception:
 # --- MCP types ---
 from mcp.server.fastmcp import FastMCP
 from mcp import types
+
+# ============================================================================
+# PATCH: Disable MCP host validation for Railway deployment
+# ============================================================================
+try:
+    from mcp.server.sse import SseServerTransport
+    original_sse_init = SseServerTransport.__init__
+    def patched_sse_init(self, endpoint, security_settings=None):
+        # Force security_settings to None to disable validation
+        return original_sse_init(self, endpoint, None)
+    SseServerTransport.__init__ = patched_sse_init
+    logging.info("Patched SseServerTransport to disable host validation")
+except Exception as e:
+    logging.warning(f"Could not patch SseServerTransport: {e}")
+
+try:
+    from mcp.server.streamable_http import StreamableHTTPServerTransport
+    original_http_init = StreamableHTTPServerTransport.__init__
+    def patched_http_init(self, *args, **kwargs):
+        kwargs['security_settings'] = None
+        return original_http_init(self, *args, **kwargs)
+    StreamableHTTPServerTransport.__init__ = patched_http_init
+    logging.info("Patched StreamableHTTPServerTransport to disable host validation")
+except Exception as e:
+    logging.warning(f"Could not patch StreamableHTTPServerTransport: {e}")
+# ============================================================================
 
 # --- import your LangGraph tool(s) ---
 from src.agent.graph import (
