@@ -2,7 +2,7 @@
 PYTHONPATH = "/app/src"
 
 [phases.setup]
-nixPkgs = ["python312"]
+nixPkgs = ["python312", "pip"]
 
 [phases.install]
 dependsOn = ["setup"]
