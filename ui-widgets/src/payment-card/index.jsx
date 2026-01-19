@@ -100,9 +100,10 @@ const STRIPE_PUBLISHABLE_KEY =
   (typeof import.meta !== "undefined" && import.meta.env?.VITE_STRIPE_PUBLISHABLE_KEY) ||
   "pk_test_51SPrVhPkNDnp9jpzxHjAsd0EV5FAiYVg6cBV5ZyYtSvhqIhMfmBzd8HjJmdIduujaWVJ5f31f1pgYm4P6QZpuXzu006FzqXGD7";
 
+// ✅ FIXED: Use production MCP server URL instead of localhost
 const API_BASE =
   (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_BASE) ||
-  "http://localhost:8000";
+  "https://mcp-server-production-1b1f.up.railway.app";
 
 /* -----------------------------
    Stripe.js loader (CDN)
