@@ -231,11 +231,43 @@ def _widget_html(root_id: str, css_url: str, js_url: str) -> str:
         f'<script type="module" src="{js_url}"></script>'
     )
 
+# Cache for remote asset filenames
+_REMOTE_ASSETS_CACHE: Dict[str, Dict[str, str]] = {}
+
+def _fetch_remote_asset_names():
+    """Fetch asset filenames from remote server once and cache them."""
+    global _REMOTE_ASSETS_CACHE
+    
+    if _REMOTE_ASSETS_CACHE:
+        return  # Already cached
+    
+    try:
+        import httpx
+        response = httpx.get(f"{ASSETS_BASE_URL}/", timeout=10)
+        if response.status_code == 200:
+            import re
+            # Find all widget files: name-hash.ext
+            pattern = r'([\w-]+)-([\w]+)\.(css|js|html)'
+            for match in re.finditer(pattern, response.text):
+                name, hash_val, ext = match.groups()
+                if name not in _REMOTE_ASSETS_CACHE:
+                    _REMOTE_ASSETS_CACHE[name] = {}
+                _REMOTE_ASSETS_CACHE[name][ext] = f"{name}-{hash_val}.{ext}"
+            log.info(f"Cached remote assets: {list(_REMOTE_ASSETS_CACHE.keys())}")
+    except Exception as e:
+        log.warning(f"Could not fetch remote assets: {e}")
+
+def _pick_remote_asset(prefix: str, ext: str) -> str:
+    """Get the hashed filename for a remote asset."""
+    _fetch_remote_asset_names()
+    
+    if prefix in _REMOTE_ASSETS_CACHE and ext in _REMOTE_ASSETS_CACHE[prefix]:
+        return _REMOTE_ASSETS_CACHE[prefix][ext]
+    
+    raise FileNotFoundError(f"No remote {prefix}-*.{ext} found")
+
 def resolve_widget_html(name: str, root_id: str) -> str:
-    """
-    Try to load widget HTML from local assets.
-    If local assets don't exist, return a remote-loading stub.
-    """
+    # First try local assets
     try:
         html_name = _pick_hashed_asset(ASSETS_DIR, name, "html")
         raw_html = (ASSETS_DIR / html_name).read_text(encoding="utf-8")
@@ -245,22 +277,24 @@ def resolve_widget_html(name: str, root_id: str) -> str:
             .replace('href="/assets/', f'href="{ASSETS_BASE_URL}/')
         )
     except FileNotFoundError:
-        # Local assets not found - use remote URL fallback
-        # This happens in production when ui-widgets is a separate service
-        log.info(f"Local assets not found for {name}, using remote ASSETS_BASE_URL: {ASSETS_BASE_URL}")
-        
-        # Return a simple stub that loads from remote
-        return (
-            f'<div id="{root_id}"></div>\n'
-            f'<link rel="stylesheet" href="{ASSETS_BASE_URL}/{name}.css">\n'
-            f'<script type="module" src="{ASSETS_BASE_URL}/{name}.js"></script>'
-        )
+        pass  # Local not found, try remote
+    
+    # Try remote assets
+    try:
+        log.info(f"Local assets not found for {name}, trying remote ASSETS_BASE_URL: {ASSETS_BASE_URL}")
+        css = _pick_remote_asset(name, "css")
+        js = _pick_remote_asset(name, "js")
+        return _widget_html(f"{name}-root", f"{ASSETS_BASE_URL}/{css}", f"{ASSETS_BASE_URL}/{js}")
+    except FileNotFoundError:
+        pass  # Remote not found either
     except Exception as e:
-        log.warning(f"Error resolving widget {name}: {e}")
-        return (
-            f'<div style="padding:12px;font-family:system-ui">'
-            f'<b>{name} widget loading from remote...</b></div>'
-        )
+        log.warning(f"Error fetching remote assets for {name}: {e}")
+    
+    # Final fallback - error message
+    return (
+        f'<div style="padding:12px;font-family:system-ui">'
+        f'<b>{name} assets not found.</b></div>'
+    )
 
 @dataclass(frozen=True)
 class Widget:
