@@ -638,3 +638,14 @@ body {
     font-size: 13px;
   }
 }
+
+/* ========== Selection Bubble - HIDDEN ========== */
+.fc-selection,
+.fc-selection--sent {
+  display: none !important;
+}
+
+/* ========== Diagnostics - HIDDEN ========== */
+.fc-diag {
+  display: none !important;
+}

@@ -715,3 +715,8 @@
     height: 40px;
   }
 }
+
+/* View details button - HIDDEN */
+.rc-details-btn {
+  display: none !important;
+}

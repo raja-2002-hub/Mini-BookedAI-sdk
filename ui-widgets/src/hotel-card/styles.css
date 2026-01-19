@@ -395,3 +395,7 @@
     height: 40px;
   }
 }
+
+.view-details-button-class {
+  display: none !important;
+}
