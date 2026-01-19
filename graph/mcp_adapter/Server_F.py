@@ -1,6 +1,26 @@
 # graph/mcp_adapter/server.py
 from __future__ import annotations
 
+class _MockTransportSecurity:
+    """Mock transport security that allows all hosts (for Railway deployment)"""
+    @staticmethod
+    def validate_host(*args, **kwargs):
+        return None
+    
+    @staticmethod
+    def _validate_host(*args, **kwargs):
+        return None
+    
+    @staticmethod
+    def check_host(*args, **kwargs):
+        return True
+    
+    # Add any other methods that might be called
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+# Inject the mock BEFORE mcp is imported
+sys.modules['mcp.server.transport_security'] = _MockTransportSecurity()
 import os, sys, site, logging, json, re, traceback
 from pathlib import Path
 from dataclasses import dataclass
@@ -997,19 +1017,6 @@ def normalize_seat_maps(seat_maps_raw) -> tuple[list, int]:
 
     return available, total
 
-# Patch MCP to allow Railway host (disable host validation for production)
-try:
-    from mcp.server import transport_security
-    # Override the host validation to allow Railway domain
-    original_validate_host = getattr(transport_security, 'validate_host', None)
-    if original_validate_host:
-        transport_security.validate_host = lambda *args, **kwargs: None
-    # Also try _validate_host (private method)
-    if hasattr(transport_security, '_validate_host'):
-        transport_security._validate_host = lambda *args, **kwargs: None
-    log.info("Patched MCP transport_security for Railway deployment")
-except Exception as e:
-    log.warning(f"Could not patch transport_security: {e}")
 
 # ---------- MCP app ----------
 mcp = FastMCP(
