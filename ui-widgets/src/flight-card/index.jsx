@@ -1,4 +1,4 @@
-﻿import React, {
+import React, {
   useMemo,
   useState,
   useSyncExternalStore,
@@ -12,6 +12,16 @@ import "./styles.css";
    Constants
 ------------------------------ */
 const OFFER_EXPIRY_MINUTES = 30;
+
+/* -----------------------------
+   Config - Use environment variables
+------------------------------ */
+const API_BASE = import.meta.env.VITE_API_BASE;
+
+// Validate required environment variables
+if (!API_BASE) {
+  console.error("Missing VITE_API_BASE environment variable");
+}
 
 /* -----------------------------
    Host globals (window.openai.*)
@@ -52,8 +62,12 @@ async function sendFollowUpMessage(prompt) {
 }
 
 async function blockNextFlightSearchOnServer() {
+  if (!API_BASE) {
+    console.warn("API_BASE not configured, skipping block request");
+    return;
+  }
   try {
-    await fetch("http://localhost:8000/widget/flight/block_next", {
+    await fetch(`${API_BASE}/widget/flight/block_next`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
@@ -524,7 +538,10 @@ function FlightCard({ f, index, onSelect, disabled, startTime }) {
             {/* Divider */}
             <div className="fc-divider" />
             
-            <div className="fc-leg-right" />
+            {/* ✅ FIXED: Added More Info button for return leg */}
+            <div className="fc-leg-right">
+              <MoreInfoButton open={showDetails} onToggle={handleToggleDetails} />
+            </div>
           </div>
         )}
       </div>
