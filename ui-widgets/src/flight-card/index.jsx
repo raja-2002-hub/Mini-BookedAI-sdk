@@ -112,6 +112,19 @@ function mapFlights(output) {
       stopLocations = stopLocations.split(",").map(s => s.trim()).filter(Boolean);
     }
 
+    // Parse return stops
+    let returnStopsCount = f.returnStops || f.return_stops || f.return_stop_count || 0;
+    if (typeof returnStopsCount === "string") {
+      const match = returnStopsCount.match(/(\d+)/);
+      returnStopsCount = match ? parseInt(match[1], 10) : 0;
+    }
+
+    // Parse return stop locations
+    let returnStopLocations = f.returnStopLocations || f.return_stop_locations || f.return_layovers || [];
+    if (typeof returnStopLocations === "string") {
+      returnStopLocations = returnStopLocations.split(",").map(s => s.trim()).filter(Boolean);
+    }
+
     return {
       id: f.id || f.offer_id || `flight_${i}`,
       airlineShort: f.airlineShort || f.airline || f.owner || "",
@@ -127,15 +140,24 @@ function mapFlights(output) {
       returnWeekday: f.returnWeekday || f.return_weekday || "",
       route: f.route || "",
       duration: f.duration || "",
+      returnDuration: f.returnDuration || f.return_duration || "",
       highlight: !!f.highlight || i === 0,
       price: priceValue,
       tax: taxValue,
       flightNumber: f.flightNumber || f.flight_number || f.flight_no || "",
+      returnFlightNumber: f.returnFlightNumber || f.return_flight_number || f.return_flight_no || "",
       stops: stopsCount,
       stopLocations: stopLocations,
+      returnStops: returnStopsCount,
+      returnStopLocations: returnStopLocations,
       cabin: f.cabin || f.cabin_class || "Economy",
       baggage: f.baggage || f.included_baggage || "1 checked, 1 carry-on",
       refunds: f.refunds || f.refundable || f.cancellation_policy || "N/A",
+      // Return-specific fields
+      returnAirline: f.returnAirline || f.return_airline || f.airlineShort || f.airline || f.owner || "",
+      returnCabin: f.returnCabin || f.return_cabin || f.cabin || f.cabin_class || "Economy",
+      returnBaggage: f.returnBaggage || f.return_baggage || f.baggage || f.included_baggage || "1 checked, 1 carry-on",
+      returnRefunds: f.returnRefunds || f.return_refunds || f.refunds || f.refundable || f.cancellation_policy || "N/A",
     };
   });
 }
@@ -345,9 +367,21 @@ function SelectButton({ onClick, disabled, isExpired }) {
   );
 }
 
-function DetailsPanel({ flight }) {
-  const stopsText = formatStops(flight.stops);
-  const stopLocations = flight.stopLocations || [];
+/* ✅ Updated DetailsPanel to support both departure and return */
+function DetailsPanel({ flight, type = "departure" }) {
+  const isReturn = type === "return";
+  
+  // Use return-specific data if available, otherwise fall back to main data
+  const airline = isReturn ? (flight.returnAirline || flight.airlineShort) : flight.airlineShort;
+  const flightNumber = isReturn ? (flight.returnFlightNumber || "—") : (flight.flightNumber || "—");
+  const stops = isReturn ? (flight.returnStops || 0) : (flight.stops || 0);
+  const stopLocations = isReturn ? (flight.returnStopLocations || []) : (flight.stopLocations || []);
+  const duration = isReturn ? (flight.returnDuration || flight.duration) : flight.duration;
+  const cabin = isReturn ? (flight.returnCabin || flight.cabin) : flight.cabin;
+  const baggage = isReturn ? (flight.returnBaggage || flight.baggage) : flight.baggage;
+  const refunds = isReturn ? (flight.returnRefunds || flight.refunds) : flight.refunds;
+  
+  const stopsText = formatStops(stops);
   
   // Extract stop location codes for display
   const stopCodes = stopLocations.map(s => {
@@ -360,13 +394,13 @@ function DetailsPanel({ flight }) {
       {/* Airline */}
       <div className="fc-details-row">
         <span className="fc-details-label">Airline:</span>
-        <span className="fc-details-value">{flight.airlineShort || "—"}</span>
+        <span className="fc-details-value">{airline || "—"}</span>
       </div>
       
       {/* Flight Number */}
       <div className="fc-details-row">
         <span className="fc-details-label">Flight Number:</span>
-        <span className="fc-details-value">{flight.flightNumber || "—"}</span>
+        <span className="fc-details-value">{flightNumber}</span>
       </div>
       
       {/* Stops */}
@@ -378,29 +412,29 @@ function DetailsPanel({ flight }) {
       {/* Cabin */}
       <div className="fc-details-row">
         <span className="fc-details-label">Cabin:</span>
-        <span className="fc-details-value">{flight.cabin || "Economy"}</span>
+        <span className="fc-details-value">{cabin || "Economy"}</span>
       </div>
       
       {/* Baggage */}
       <div className="fc-details-row">
         <span className="fc-details-label">Baggage:</span>
-        <span className="fc-details-value">{flight.baggage || "—"}</span>
+        <span className="fc-details-value">{baggage || "—"}</span>
       </div>
       
       {/* Refunds */}
       <div className="fc-details-row">
         <span className="fc-details-label">Refunds:</span>
-        <span className="fc-details-value">{flight.refunds || "N/A"}</span>
+        <span className="fc-details-value">{refunds || "N/A"}</span>
       </div>
       
       {/* Duration */}
       <div className="fc-details-row">
         <span className="fc-details-label">Duration:</span>
-        <span className="fc-details-value">{flight.duration || "—"}</span>
+        <span className="fc-details-value">{duration || "—"}</span>
       </div>
       
       {/* Stop Locations (only show if there are stops) */}
-      {flight.stops > 0 && stopCodes.length > 0 && (
+      {stops > 0 && stopCodes.length > 0 && (
         <div className="fc-details-row">
           <span className="fc-details-label">Stop Locations:</span>
           <span className="fc-details-value">{stopCodes.join(", ")}</span>
@@ -408,7 +442,7 @@ function DetailsPanel({ flight }) {
       )}
       
       {/* Individual stop details with layover duration */}
-      {flight.stops > 0 && stopLocations.map((stop, idx) => {
+      {stops > 0 && stopLocations.map((stop, idx) => {
         if (typeof stop === "object" && stop.name && stop.duration) {
           return (
             <div className="fc-details-row" key={idx}>
@@ -433,11 +467,15 @@ function DetailsPanel({ flight }) {
 
 /* ------------ Flight Card ------------ */
 function FlightCard({ f, index, onSelect, disabled, startTime }) {
-  const [showDetails, setShowDetails] = useState(false);
+  // ✅ Separate state for departure and return details
+  const [showDepartureDetails, setShowDepartureDetails] = useState(false);
+  const [showReturnDetails, setShowReturnDetails] = useState(false);
+  
   const { isExpired, timeDisplay } = useCountdown(startTime);
   
   const isBest = !!f.highlight || index === 0;
   const hasStops = f.stops > 0;
+  const hasReturnStops = f.returnStops > 0;
 
   const { outboundRoute, returnRoute } = useMemo(() => {
     const full = (f.route || "").trim();
@@ -470,9 +508,15 @@ function FlightCard({ f, index, onSelect, disabled, startTime }) {
     if (!isExpired) onSelect(f, index);
   };
 
-  const handleToggleDetails = (e) => {
+  // ✅ Separate toggle handlers for departure and return
+  const handleToggleDepartureDetails = (e) => {
     e.stopPropagation();
-    setShowDetails((v) => !v);
+    setShowDepartureDetails((v) => !v);
+  };
+
+  const handleToggleReturnDetails = (e) => {
+    e.stopPropagation();
+    setShowReturnDetails((v) => !v);
   };
 
   return (
@@ -512,37 +556,44 @@ function FlightCard({ f, index, onSelect, disabled, startTime }) {
           <div className="fc-divider" />
           
           <div className="fc-leg-right">
-            <MoreInfoButton open={showDetails} onToggle={handleToggleDetails} />
+            <MoreInfoButton open={showDepartureDetails} onToggle={handleToggleDepartureDetails} />
           </div>
         </div>
 
-        {/* Details panel (expandable) */}
-        {showDetails && <DetailsPanel flight={f} />}
+        {/* ✅ Departure Details panel (expandable) */}
+        {showDepartureDetails && <DetailsPanel flight={f} type="departure" />}
 
         {/* Return leg (if exists) */}
         {hasReturn && (
-          <div className="fc-leg fc-leg--return">
-            <div className="fc-leg-left">
-              <DateDisplay weekday={f.returnWeekday} date={returnDate} />
-              <div className="fc-leg-label">RETURN</div>
+          <>
+            <div className="fc-leg fc-leg--return">
+              <div className="fc-leg-left">
+                <DateDisplay weekday={f.returnWeekday} date={returnDate} />
+                <div className="fc-leg-label">RETURN</div>
+              </div>
+              
+              {/* Divider */}
+              <div className="fc-divider" />
+              
+              <div className="fc-leg-middle">
+                <div className="fc-time-row">
+                  <TimeRange depart={f.returnDepart} arrive={f.returnArrive} />
+                  {hasReturnStops && <StopsPill stops={f.returnStops} />}
+                </div>
+                <RouteDisplay route={returnRoute} />
+              </div>
+              
+              {/* Divider */}
+              <div className="fc-divider" />
+              
+              <div className="fc-leg-right">
+                <MoreInfoButton open={showReturnDetails} onToggle={handleToggleReturnDetails} />
+              </div>
             </div>
-            
-            {/* Divider */}
-            <div className="fc-divider" />
-            
-            <div className="fc-leg-middle">
-              <TimeRange depart={f.returnDepart} arrive={f.returnArrive} />
-              <RouteDisplay route={returnRoute} />
-            </div>
-            
-            {/* Divider */}
-            <div className="fc-divider" />
-            
-            {/* ✅ FIXED: Added More Info button for return leg */}
-            <div className="fc-leg-right">
-              <MoreInfoButton open={showDetails} onToggle={handleToggleDetails} />
-            </div>
-          </div>
+
+            {/* ✅ Return Details panel (expandable) */}
+            {showReturnDetails && <DetailsPanel flight={f} type="return" />}
+          </>
         )}
       </div>
 
