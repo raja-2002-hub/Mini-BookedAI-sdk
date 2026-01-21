@@ -82,8 +82,8 @@ body {
   flex-direction: column;
   justify-content: space-between;
 
-  /* ✅ Reduced padding to make header area feel less huge */
-  padding: 36px 32px;
+  /* ✅ COMPACT: reduced padding */
+  padding: 20px 24px;
 
   height: 600px;
   max-height: 600px;
@@ -96,31 +96,16 @@ body {
   min-height: 0;
 }
 
+/* ✅ COMPACT: hide back button */
 .sc-back-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: none;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.1);
-  color: var(--stripe-dark-text);
-  cursor: pointer;
-  transition: background 0.2s;
-  margin-bottom: 22px; /* ✅ slightly tighter */
-}
-
-.sc-back-btn:hover {
-  background: rgba(255, 255, 255, 0.2);
+  display: none;
 }
 
 .sc-merchant {
-  margin-bottom: 6px;
+  margin-bottom: 4px; /* ✅ reduced from 6px */
 }
 
 .sc-merchant-name {
-  /* ✅ slightly smaller and cleaner (no weird username anymore) */
   font-size: 13px;
   font-weight: 500;
   color: var(--stripe-dark-secondary);
@@ -132,19 +117,19 @@ body {
   display: flex;
   align-items: baseline;
   gap: 10px;
-  margin-bottom: 28px; /* ✅ reduced from 40px */
+  margin-bottom: 16px; /* ✅ reduced from 28px */
 }
 
 .sc-currency {
-  font-size: 16px; /* ✅ reduced */
+  font-size: 16px;
   font-weight: 600;
   color: var(--stripe-dark-text);
   opacity: 0.95;
 }
 
-/* ✅ Reduced the "big total" using clamp so it scales nicely */
+/* ✅ Slightly smaller amount */
 .sc-amount-value {
-  font-size: clamp(24px, 3.2vw, 32px);
+  font-size: clamp(22px, 3vw, 28px); /* reduced from clamp(24px, 3.2vw, 32px) */
   font-weight: 650;
   color: var(--stripe-dark-text);
   letter-spacing: -0.4px;
@@ -153,14 +138,14 @@ body {
 /* Line items */
 .sc-line-items {
   border-top: 1px solid rgba(255, 255, 255, 0.1);
-  padding-top: 20px;
+  padding-top: 12px; /* ✅ reduced from 20px */
 }
 
 .sc-line-item {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  padding: 12px 0;
+  padding: 8px 0; /* ✅ reduced from 12px */
 }
 
 .sc-line-item-sub {
@@ -187,7 +172,7 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding-top: 18px;
+  padding-top: 12px; /* ✅ reduced from 18px */
   border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
@@ -680,7 +665,7 @@ body {
   justify-content: flex-end;
 }
 
-/* Responsive Design (UPDATED)
+/* Responsive Design
    ✅ Keep iframe fixed at 600px
    ✅ Only switch to column + make payment area scroll
 */
@@ -703,14 +688,14 @@ body {
   .sc-summary {
     flex: 0 0 auto;
     max-width: none;
-    padding: 28px 20px;
+    padding: 16px 20px; /* ✅ reduced from 28px */
     height: auto;
     max-height: none;
     overflow: hidden;
   }
 
   .sc-amount-value {
-    font-size: clamp(22px, 4vw, 30px);
+    font-size: clamp(20px, 4vw, 26px); /* ✅ slightly smaller */
   }
 
   .sc-payment {
@@ -725,15 +710,11 @@ body {
 
 @media (max-width: 480px) {
   .sc-summary {
-    padding: 22px 16px;
-  }
-
-  .sc-back-btn {
-    margin-bottom: 18px;
+    padding: 14px 16px; /* ✅ reduced from 22px */
   }
 
   .sc-amount {
-    margin-bottom: 20px;
+    margin-bottom: 12px; /* ✅ reduced */
   }
 
   .sc-payment {
