@@ -78,6 +78,30 @@ async function blockNextFlightSearchOnServer() {
 }
 
 /* -----------------------------------------
+   Tax Calculation Helper
+------------------------------------------ */
+function calculateTaxBreakdown(totalPrice) {
+  if (!totalPrice || totalPrice === 'Price N/A' || totalPrice === '—') return null;
+  
+  // Extract number from price string (handles formats like "$1108", "$1,108", "1108 AUD", etc.)
+  const priceStr = String(totalPrice).replace(/[^0-9.]/g, '');
+  const numPrice = parseFloat(priceStr);
+  
+  if (isNaN(numPrice) || numPrice <= 0) return null;
+  
+  // Calculate tax using 10% rate (same as successful ui__3_.tsx)
+  const taxRate = 0.1;
+  const subtotal = numPrice / (1 + taxRate);
+  const taxAmount = numPrice - subtotal;
+  
+  return {
+    subtotal: subtotal,
+    tax: taxAmount,
+    total: numPrice
+  };
+}
+
+/* -----------------------------------------
    Helpers: map flights
 ------------------------------------------ */
 function mapFlights(output) {
@@ -96,6 +120,7 @@ function mapFlights(output) {
       priceValue = amt ? `${curr}${amt}` : "";
     }
 
+    // Get tax value from server if available
     let taxValue = f.tax || f.tax_amount || f.taxes || "";
     if (typeof taxValue === "number") taxValue = `incl. $${taxValue} tax`;
 
@@ -343,13 +368,28 @@ function MoreInfoButton({ open, onToggle }) {
   );
 }
 
+/* ✅ FIXED: PriceDisplay now calculates tax from price if not provided */
 function PriceDisplay({ price, tax }) {
-  const displayPrice = price || "$161";
-  const displayTax = tax || "incl. $15 tax";
+  const displayPrice = price || "—";
+  
+  // Determine tax to display
+  let displayTax = "";
+  
+  // First, check if tax was provided from server
+  if (tax && typeof tax === "string" && tax.trim() !== "") {
+    displayTax = tax;
+  } else {
+    // Calculate tax from price (10% estimate) - matching ui__3_.tsx approach
+    const taxBreakdown = calculateTaxBreakdown(price);
+    if (taxBreakdown) {
+      displayTax = `incl. $${Math.round(taxBreakdown.tax).toLocaleString('en-US')} tax`;
+    }
+  }
+  
   return (
     <div className="fc-price-block">
       <div className="fc-price">{displayPrice}</div>
-      <div className="fc-tax">{displayTax}</div>
+      {displayTax && <div className="fc-tax">{displayTax}</div>}
     </div>
   );
 }
