@@ -1167,10 +1167,12 @@ async def _list_tools() -> List[types.Tool]:
             name="start_hotel_checkout",
             title="Start hotel payment (return clickable Stripe Checkout URL)",
             description=(
-                "Builds a Stripe Checkout link for a selected room and returns a clickable URL in the chat. "
-                "Does not collect cards in chat. Opens in a new tab. "
-                "IMPORTANT: After calling this tool, WAIT for the user to complete payment. "
-                "Do NOT call this tool again until a new booking is requested."
+                "Creates and displays a secure payment form for the selected room. "
+                "After calling this tool: "
+                "(1) A payment widget will appear above your message with the payment form embedded "
+                "(2) Tell the user 'Please complete your payment in the form above' "
+                "(3) DO NOT share or mention the payment URL - the form is already visible "
+                "(4) WAIT for payment completion - do NOT call this tool again until a new booking is requested."
             ),
             inputSchema={
                 "type": "object",
@@ -2832,12 +2834,17 @@ async def _call_tool_request(req: types.CallToolRequest) -> types.ServerResult:
                 "openai/widgetAccessible": True,
                 "openai/resultCanProduceWidget": True,
             }
+
             return types.ServerResult(types.CallToolResult(
                 content=[
                     res,
                     types.TextContent(
                         type="text",
-                        text=f"Checkout ready. Please complete payment in the form above to confirm your booking."
+                        text=(
+                            "Payment form is now displayed above. "
+                            "The user can see and interact with the secure payment form directly. "
+                            "DO NOT share the payment URL in chat - the form is already visible to the user."
+                        )
                     ),
                 ],
                 structuredContent=payload,
@@ -3188,7 +3195,11 @@ async def _call_tool_request(req: types.CallToolRequest) -> types.ServerResult:
                     res,
                     types.TextContent(
                         type="text",
-                        text=f"Checkout ready{seat_text}. Please complete payment in the form above to confirm your booking.",
+                        text=(
+                            f"Payment form is now displayed above{seat_text}. "
+                            "The user can see and interact with the secure payment form directly. "
+                            "DO NOT share the payment URL in chat - the form is already visible to the user."
+                        )
                     ),
                 ],
                 structuredContent=payload,
