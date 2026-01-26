@@ -2832,17 +2832,12 @@ async def _call_tool_request(req: types.CallToolRequest) -> types.ServerResult:
                 "openai/widgetAccessible": True,
                 "openai/resultCanProduceWidget": True,
             }
-
             return types.ServerResult(types.CallToolResult(
                 content=[
                     res,
                     types.TextContent(
                         type="text",
-                        text=f"Pay {currency} {total_amount} via secure checkout:\n{checkout_url}"
-                    ),
-                    types.TextContent(
-                        type="text",
-                        text=f"[Open secure checkout]({checkout_url})"
+                        text=f"Checkout ready. Please complete payment in the form above to confirm your booking."
                     ),
                 ],
                 structuredContent=payload,
@@ -3188,23 +3183,17 @@ async def _call_tool_request(req: types.CallToolRequest) -> types.ServerResult:
                 "openai/widgetAccessible": True,
                 "openai/resultCanProduceWidget": True,
             }
-
             return types.ServerResult(types.CallToolResult(
                 content=[
                     res,
                     types.TextContent(
                         type="text",
-                        text=f"Pay {currency} {amount:.2f}{seat_text} via Stripe Checkout:\n{checkout_url}",
-                    ),
-                    types.TextContent(
-                        type="text",
-                        text=f"[Open secure checkout]({checkout_url})",
+                        text=f"Checkout ready{seat_text}. Please complete payment in the form above to confirm your booking.",
                     ),
                 ],
                 structuredContent=payload,
                 _meta=meta,
             ))
-
 
         if name == "change_flight_booking_tool":
             order_id = (args.get("order_id") or "").strip()
